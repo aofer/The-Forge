@@ -43,16 +43,10 @@ class DrawTriangle: public IApp
 public:
     bool Init()
     {
-        // FILE PATHS
-        //fsSetPathForResourceDir(pSystemFileIO, RD_SHADER_BINARIES, RD_SHADER_BINARIES, "CompiledShaders");
-        //fsSetPathForResourceDir(pSystemFileIO, RD_DEBUG, RD_DEBUG, "Debug");
-        //fsSetPathForResourceDir(pSystemFileIO, RD_CONTENT, RD_FONTS, "Fonts");
-
         //Initialize the settings and renderer
         RendererDesc settings;
         memset(&settings, 0, sizeof(settings));
-        //settings.mD3D11Supported = true;
-        //settings.mGLESSupported = true;
+
         initGPUConfiguration(settings.pExtendedSettings);
         initRenderer(GetName(), &settings, &pRenderer);
 
@@ -105,20 +99,10 @@ public:
 
         waitForAllResourceLoads(); //Add this after adding resourceLoader
 
-
-        //resource loader has a dependency on input handler
-        //InputSystemDesc inputDesc = {};
-        //inputDesc.pRenderer = pRenderer;
-        //inputDesc.pWindow = pWindow;
-
-        //if (!initInputSystem(&inputDesc))
-        //    return false;
-
         return true;
     }
     void Exit()
     {
-        //exitInputSystem();
 
         exitQueue(pRenderer, pGraphicsQueue);
         exitGpuCmdRing(pRenderer, &gGraphicsCmdRing);
