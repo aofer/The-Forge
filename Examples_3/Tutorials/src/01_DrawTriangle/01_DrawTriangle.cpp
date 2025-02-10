@@ -4,8 +4,6 @@
 // Renderer
 #include "../../../../Common_3/Utilities/RingBuffer.h"
 #include "../../../../Common_3/Graphics/Interfaces/IGraphics.h"
-#include "../../../../Common_3/OS/Interfaces/IInput.h"
-
 
 // But we only need Two sets of resources (one in flight and one being used on CPU)
 const uint32_t gDataBufferCount = 2;
@@ -203,6 +201,7 @@ public:
         cmdSetScissor(cmd, 0, 0, pRenderTarget->mWidth, pRenderTarget->mHeight);
 
         //Draw triangle
+
 
         const uint32_t stride = sizeof(float) * 3 * 2;
         cmdBindPipeline(cmd, pTrianglePipeline);
