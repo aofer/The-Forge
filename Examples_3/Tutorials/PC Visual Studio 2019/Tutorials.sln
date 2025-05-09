@@ -1,6 +1,6 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
-VisualStudioVersion = 17.12.35527.113 d17.12
+VisualStudioVersion = 17.12.35527.113
 MinimumVisualStudioVersion = 16.0.0.0
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tools", "Tools", "{21A6980D-04AA-430D-BE3D-74F151226C8B}"
 EndProject
@@ -49,6 +49,10 @@ EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tutorials", "Tutorials", "{3293D63D-3CC3-4B95-821F-86992C0236FB}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "01_DrawTriangle", "01_DrawTriangle.vcxproj", "{61D75F5B-ADAB-4E83-B937-EFAEF193B073}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "02_TexturedModel", "02_TexturedModel.vcxproj", "{C0C7EC13-0C55-44EC-8CAE-7C5E1CC68552}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Voxels", "Voxels.vcxproj", "{BFAD4EE0-A60B-4C6F-A4D2-8C21A8F1240B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -100,6 +104,14 @@ Global
 		{61D75F5B-ADAB-4E83-B937-EFAEF193B073}.Debug|x64.Build.0 = Debug|x64
 		{61D75F5B-ADAB-4E83-B937-EFAEF193B073}.Release|x64.ActiveCfg = Release|x64
 		{61D75F5B-ADAB-4E83-B937-EFAEF193B073}.Release|x64.Build.0 = Release|x64
+		{C0C7EC13-0C55-44EC-8CAE-7C5E1CC68552}.Debug|x64.ActiveCfg = Debug|x64
+		{C0C7EC13-0C55-44EC-8CAE-7C5E1CC68552}.Debug|x64.Build.0 = Debug|x64
+		{C0C7EC13-0C55-44EC-8CAE-7C5E1CC68552}.Release|x64.ActiveCfg = Release|x64
+		{C0C7EC13-0C55-44EC-8CAE-7C5E1CC68552}.Release|x64.Build.0 = Release|x64
+		{BFAD4EE0-A60B-4C6F-A4D2-8C21A8F1240B}.Debug|x64.ActiveCfg = Debug|x64
+		{BFAD4EE0-A60B-4C6F-A4D2-8C21A8F1240B}.Debug|x64.Build.0 = Debug|x64
+		{BFAD4EE0-A60B-4C6F-A4D2-8C21A8F1240B}.Release|x64.ActiveCfg = Release|x64
+		{BFAD4EE0-A60B-4C6F-A4D2-8C21A8F1240B}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -115,6 +127,8 @@ Global
 		{F4BE7E97-8876-4A34-834F-4BC918020B57} = {21A6980D-04AA-430D-BE3D-74F151226C8B}
 		{ADA72694-302E-45F5-AFCA-BB7C56751EEF} = {21A6980D-04AA-430D-BE3D-74F151226C8B}
 		{61D75F5B-ADAB-4E83-B937-EFAEF193B073} = {3293D63D-3CC3-4B95-821F-86992C0236FB}
+		{C0C7EC13-0C55-44EC-8CAE-7C5E1CC68552} = {3293D63D-3CC3-4B95-821F-86992C0236FB}
+		{BFAD4EE0-A60B-4C6F-A4D2-8C21A8F1240B} = {3293D63D-3CC3-4B95-821F-86992C0236FB}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {948F21A0-5B36-35C9-B219-88B1DAC0D0C2}

@@ -1,0 +1,30 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="src">
+      <UniqueIdentifier>{40669c0f-5089-423b-ae36-30a7f34cdf0e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders">
+      <UniqueIdentifier>{29520d1d-c2cd-480d-b190-3b65c232ae5f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders\FSL">
+      <UniqueIdentifier>{919fd28e-ca3a-4a6d-b0f4-924af5d86683}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\src\Voxels\Shaders\FSL\voxels.frag.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </None>
+    <None Include="..\src\Voxels\Shaders\FSL\voxels.vert.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </None>
+    <None Include="..\src\Voxels\Shaders\FSL\ShaderList.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\Voxels\Voxels.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

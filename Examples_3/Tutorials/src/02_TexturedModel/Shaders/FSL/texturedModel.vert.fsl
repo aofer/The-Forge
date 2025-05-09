@@ -1,0 +1,50 @@
+#include "../../../../../../Common_3/Graphics/ShaderUtilities.h.fsl"
+
+RES(Tex2D(float4), albedoMap,  UPDATE_FREQ_NONE, t1, binding = 1);
+RES(SamplerState, materialSampler, UPDATE_FREQ_NONE, s1, binding = 2);
+
+// UPDATE_FREQ_PER_FRAME
+STRUCT(Camera)
+{
+	DATA(float4x4, projView, None);
+	DATA(float4x4, invProjView, None);
+	DATA(float4, camPos, None);
+};
+RES(CBUFFER(Camera), cbCamera, UPDATE_FREQ_PER_FRAME, b0, binding = 0);
+
+// UPDATE_FREQ_PER_DRAW
+STRUCT(Object)
+{
+	DATA(float4x4, worldMat, None);
+};
+RES(CBUFFER(Object), cbObject, UPDATE_FREQ_PER_DRAW, b1, binding = 1);
+
+
+STRUCT(VSInput)
+{
+	DATA(float3, Position, POSITION);
+	DATA(uint, Normal,   NORMAL);
+	DATA(uint, Uv,       TEXCOORD0);
+};
+
+STRUCT(VSOutput)
+{
+	DATA(float4, Position, SV_Position);
+	DATA(float3, pos,	 POSITION);
+	DATA(float3, normal, NORMAL);
+	DATA(float2, uv,	 TEXCOORD0);
+};
+
+VSOutput VS_MAIN( VSInput In, SV_InstanceID(uint) InstanceID )
+{
+    INIT_MAIN;
+    VSOutput Out;
+
+	float4x4 tempMat = mul(cbCamera.projView, cbObject.worldMat);
+    Out.Position = mul(tempMat, float4(In.Position.xyz, 1.0f));
+	Out.pos = float3(mul(cbObject.worldMat, float4(In.Position.xyz, 1.0f)).rgb);
+	Out.normal = float3(1.0,1.0,1.0);
+	Out.uv = unpack2Floats(In.Uv);
+	//Out.uv = float2(0.0,1.0);
+    RETURN(Out);
+}

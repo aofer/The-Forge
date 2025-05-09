@@ -1,0 +1,7 @@
+#frag voxels.frag
+#include "voxels.frag.fsl"
+#end
+
+#vert voxels.vert
+#include "voxels.vert.fsl"
+#end

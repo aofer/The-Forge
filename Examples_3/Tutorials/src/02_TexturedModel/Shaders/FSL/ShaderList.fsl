@@ -1,0 +1,7 @@
+#frag texturedModel.frag
+#include "texturedModel.frag.fsl"
+#end
+
+#vert texturedModel.vert
+#include "texturedModel.vert.fsl"
+#end
