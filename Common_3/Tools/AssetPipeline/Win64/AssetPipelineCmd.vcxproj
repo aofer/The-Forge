@@ -19,8 +19,8 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\..\..\Prospero\Common_3\Tools\AssetPipeline\AssetPipeline_TexturesGnf.cpp"  Condition="exists('$(SolutionDir)..\..\..\..\Prospero\')"/>
-    <ClCompile Include="..\..\..\..\Xbox\Common_3\Tools\AssetPipeline\AssetPipeline_TexturesXbox.cpp" Condition="exists('$(SolutionDir)..\..\..\..\Xbox\')"/>
+    <ClCompile Include="..\..\..\..\Prospero\Common_3\Tools\AssetPipeline\AssetPipeline_TexturesGnf.cpp" Condition="exists('$(SolutionDir)..\..\..\..\Prospero\')" />
+    <ClCompile Include="..\..\..\..\Xbox\Common_3\Tools\AssetPipeline\AssetPipeline_TexturesXbox.cpp" Condition="exists('$(SolutionDir)..\..\..\..\Xbox\')" />
     <ClCompile Include="..\..\..\OS\Windows\WindowsToolsFileSystem.cpp" />
     <ClCompile Include="..\..\..\Resources\AnimationSystem\ThirdParty\OpenSource\TressFX\TressFXAsset.cpp" />
     <ClCompile Include="..\..\ThirdParty\OpenSource\meshoptimizer\src\allocator.cpp" />
@@ -54,7 +54,7 @@
     <ProjectGuid>{9BB45EC2-8F3A-4D98-A235-40EBBB559F64}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>AssetPipeline</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0.17763.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
     <ProjectName>AssetPipelineCmd</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />

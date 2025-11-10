@@ -1,0 +1,17 @@
+//#include "../Shared.h"
+
+#frag skybox.frag
+#include "skybox.frag.fsl"
+#end
+
+#vert FT_MULTIVIEW skybox.vert
+#include "skybox.vert.fsl"
+#end
+
+#frag DisplayTexture.frag
+#include "DisplayTexture.frag.fsl"
+#end
+
+#vert DisplayTexture.vert
+#include "DisplayTexture.vert.fsl"
+#end

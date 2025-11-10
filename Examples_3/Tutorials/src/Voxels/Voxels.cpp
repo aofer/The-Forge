@@ -10,6 +10,26 @@
 // But we only need Two sets of resources (one in flight and one being used on CPU)
 const uint32_t gDataBufferCount = 2;
 
+// Vertex buffer data
+struct Vertex
+{
+    vec3 position;
+    vec3 color;
+};
+
+const Vertex cubeVertices[] = {
+    vec3(0.0f, 0.5f,  0.5f) // position
+};
+const float gCubeVertices[] = {
+    0.0f,  0.5f,  0.5f, // position
+    1.0f,  0.0f,  0.0f, // color
+    0.5f,  -0.5f, 0.5f,
+    0.0f, 1.0f, 0.0f,
+    -0.5f, -0.5f, 0.5f,
+    0.0f, 0.0f, 1.0f,
+
+};
+
 SwapChain* pSwapChain = nullptr;
 Renderer*  pRenderer = nullptr;
 Queue*     pGraphicsQueue = nullptr;

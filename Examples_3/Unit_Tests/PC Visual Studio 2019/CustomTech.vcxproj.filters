@@ -1,0 +1,80 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="src">
+      <UniqueIdentifier>{52859b4d-4509-4f3f-8ae5-d3a9eb4cb47b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders">
+      <UniqueIdentifier>{641ea93a-340e-455b-9464-65e73917a5dc}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders\FSL">
+      <UniqueIdentifier>{96f0506c-d0b1-45e0-aeeb-1c3bb77673f1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders\D3D12">
+      <UniqueIdentifier>{7ebdf6cf-d90d-465f-81a3-fc3686fd18b7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Vsibility_Buffer">
+      <UniqueIdentifier>{05d3029a-1d38-4ff3-a1bb-b4f11f7f3c43}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Vsibility_Buffer\src">
+      <UniqueIdentifier>{d231c9f9-5182-4d23-a195-52cff0337128}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <FSLShader Include="..\src\CustomTech\Shaders\FSL\skybox.vert.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </FSLShader>
+    <FSLShader Include="..\src\CustomTech\Shaders\FSL\skybox.frag.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </FSLShader>
+    <FSLShader Include="..\src\CustomTech\Shaders\FSL\ShaderList.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </FSLShader>
+    <FSLShader Include="..\src\CustomTech\Shaders\FSL\DisplayTexture.vert.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </FSLShader>
+    <FSLShader Include="..\src\CustomTech\Shaders\FSL\DisplayTexture.frag.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </FSLShader>
+    <FSLShader Include="..\src\CustomTech\Shaders\FSL\fillGbuffers.frag.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </FSLShader>
+    <FSLShader Include="..\src\CustomTech\Shaders\FSL\fillGbuffers.vert.fsl">
+      <Filter>Shaders\FSL</Filter>
+    </FSLShader>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\src\CustomTech\SkyBoxPass.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\CustomTech\TiledShadingSample.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\CustomTech\GbufferPass.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\CustomTech\RenderPass.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Visibility_Buffer\src\SanMiguel.h">
+      <Filter>Vsibility_Buffer\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\CustomTech\Components.h">
+      <Filter>src</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\CustomTech\TiledShadingSample.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\CustomTech\GbufferPass.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\CustomTech\SkyBoxPass.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Visibility_Buffer\src\SanMiguel.cpp">
+      <Filter>Vsibility_Buffer\src</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

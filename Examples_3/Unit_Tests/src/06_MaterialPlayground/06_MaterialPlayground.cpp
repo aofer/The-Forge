@@ -419,6 +419,7 @@ GpuCmdRing gGraphicsCmdRing = {};
 SwapChain* pSwapChain = NULL;
 Semaphore* pImageAcquiredSemaphore = NULL;
 uint32_t   gFrameIndex = 0;
+uint32_t   gFrameNumber = 0;
 
 VertexLayout       gVertexLayoutDefault = {};
 //--------------------------------------------------------------------------------------------
@@ -716,6 +717,12 @@ void ReloadScriptButtonCallback(void* pUserData)
 {
     UNREF_PARAM(pUserData);
     gLuaManager.ReloadUpdatableScript();
+}
+
+void RemoveDeviceButtonCallback(void* pUserData)
+{
+    UNREF_PARAM(pUserData);
+    removeDevice(pRenderer);
 }
 
 #define OUT_OF_POSITION float3(100000.0f, 100000.0f, 100000.0f)
@@ -1723,6 +1730,12 @@ public:
 
             cmdEndGpuTimestampQuery(cmd, gCurrentGpuProfileToken); // Lighting Pass
             cmdBindRenderTargets(cmd, NULL);
+
+            gFrameNumber++;
+            if (gFrameNumber > 600)
+            {
+                removeDevice(pRenderer);
+            }
         }
         // Draw hair
         else // gMaterialType == MATERIAL_HAIR
@@ -4735,6 +4748,11 @@ void GuiController::AddGui()
     UIWidget*    pReloadScript = uiAddComponentWidget(pGuiWindowMain, "Reload script", &ReloadScriptButton, WIDGET_TYPE_BUTTON);
     uiSetWidgetOnDeactivatedAfterEditCallback(pReloadScript, nullptr, ReloadScriptButtonCallback);
     luaRegisterWidget(pReloadScript);
+
+    ButtonWidget RemoveDeviceButton;
+    UIWidget*    pRemoveDevice = uiAddComponentWidget(pGuiWindowMain, "Remove device", &RemoveDeviceButton, WIDGET_TYPE_BUTTON);
+    uiSetWidgetOnDeactivatedAfterEditCallback(pRemoveDevice, nullptr, RemoveDeviceButtonCallback);
+    luaRegisterWidget(pRemoveDevice);
 
     checkbox.pData = &gDrawSkybox;
     luaRegisterWidget(uiAddComponentWidget(pGuiWindowMain, "Skybox", &checkbox, WIDGET_TYPE_CHECKBOX));
