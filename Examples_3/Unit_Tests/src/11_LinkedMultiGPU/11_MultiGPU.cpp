@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -51,6 +51,10 @@
 
 #include "../../../../Common_3/Utilities/Interfaces/IMemory.h"
 
+// fsl
+#include "../../../../Common_3/Graphics/FSL/defaults.h"
+#include "./Shaders/FSL/Global.srt.h"
+
 /// Demo structures
 struct PlanetInfoStruct
 {
@@ -67,6 +71,7 @@ struct PlanetInfoStruct
 struct UniformBlock
 {
     mat4 mProjectView;
+    mat4 mSkyProjectView;
     mat4 mToWorldMat[MAX_PLANETS];
     vec4 mColor[MAX_PLANETS];
 
@@ -108,22 +113,18 @@ Shader*        pSkyBoxDrawShader = NULL;
 Pipeline*      pSkyBoxDrawPipeline = NULL;
 Shader*        pCopyQuadShader = NULL;
 Pipeline*      pCopyQuadPipeline = NULL;
-RootSignature* pRootSignature = NULL;
 Sampler*       pSamplerSkyBox = NULL;
-Sampler*       pCopyQuadSampler = NULL;
 DescriptorSet* pDescriptorSetTexture[gViewCount] = { NULL };
 DescriptorSet* pDescriptorSetUniforms[gViewCount] = { NULL };
 DescriptorSet* pDescriptorSetCopyQuad = { NULL };
 
 Buffer* pProjViewUniformBuffer[gDataBufferCount] = { NULL };
-Buffer* pSkyboxUniformBuffer[gDataBufferCount] = { NULL };
 Buffer* pQuadVertexBuffer = NULL;
 
 uint32_t gFrameIndex = 0;
 
 int              gNumberOfSpherePoints;
 UniformBlock     gUniformData;
-UniformBlock     gUniformDataSky;
 PlanetInfoStruct gPlanetInfoData[gNumPlanets];
 
 ICameraController* pCameraController = NULL;
@@ -148,7 +149,7 @@ bool         gMultiGPURestart = false;
 bool         gMultiGpuAvailable = false;
 float*       pSpherePoints;
 
-const char* gTestScripts[] = { "11_LinkedMultiGPU/Test0.lua" };
+const char* gTestScripts[] = { "Test0.lua" };
 uint32_t    gCurrentScriptIndex = 0;
 
 float gFoVH = 90.0f;
@@ -187,7 +188,12 @@ public:
 
         // Generate sphere vertex buffer
         if (!pSpherePoints)
-            generateSpherePoints(&pSpherePoints, &gNumberOfSpherePoints, gSphereResolution, gSphereDiameter);
+        {
+            gNumberOfSpherePoints = 0;
+            generateSpherePoints(NULL, &gNumberOfSpherePoints, gSphereResolution, gSphereDiameter);
+            pSpherePoints = (float*)tf_malloc(sizeof(float) * gNumberOfSpherePoints);
+            generateSpherePoints(pSpherePoints, &gNumberOfSpherePoints, gSphereResolution, gSphereDiameter);
+        }
 
         // Setup planets (Rotation speeds are relative to Earth's, some values randomly given)
         // Sun
@@ -297,12 +303,16 @@ public:
         // check for init success
         if (!pRenderer)
         {
-            ShowUnsupportedMessage("Failed To Initialize renderer!");
+            ShowUnsupportedMessage(getUnsupportedGPUMsg());
             return false;
         }
         setupGPUConfigurationPlatformParameters(pRenderer, settings.pExtendedSettings);
 
         initResourceLoaderInterface(pRenderer);
+
+        RootSignatureDesc rootDesc = {};
+        INIT_RS_DESC(rootDesc, "default.rootsig", "compute.rootsig");
+        initRootSignature(pRenderer, &rootDesc);
 
         if (!gMultiGPURestart)
         {
@@ -376,7 +386,6 @@ public:
         }
 
         initSemaphore(pRenderer, &pImageAcquiredSemaphore);
-
         SamplerDesc samplerDesc = { FILTER_LINEAR,
                                     FILTER_LINEAR,
                                     MIPMAP_MODE_NEAREST,
@@ -384,10 +393,6 @@ public:
                                     ADDRESS_MODE_CLAMP_TO_EDGE,
                                     ADDRESS_MODE_CLAMP_TO_EDGE };
         addSampler(pRenderer, &samplerDesc, &pSamplerSkyBox);
-
-        samplerDesc.mMagFilter = FILTER_NEAREST;
-        samplerDesc.mMinFilter = FILTER_NEAREST;
-        addSampler(pRenderer, &samplerDesc, &pCopyQuadSampler);
 
         uint64_t       sphereDataSize = gNumberOfSpherePoints * sizeof(float);
         BufferLoadDesc sphereVbDesc = {};
@@ -490,8 +495,6 @@ public:
         {
             ubDesc.ppBuffer = &pProjViewUniformBuffer[i];
             addResource(&ubDesc, NULL);
-            ubDesc.ppBuffer = &pSkyboxUniformBuffer[i];
-            addResource(&ubDesc, NULL);
         }
 
         CameraMotionParameters cmp{ 160.0f, 600.0f, 600.0f };
@@ -502,7 +505,7 @@ public:
         pCameraController->setMotionParameters(cmp);
 
         AddCustomInputBindings();
-        initScreenshotInterface(pRenderer, pGraphicsQueue[0]);
+        initScreenshotCapturer(pRenderer, pGraphicsQueue[0], GetName());
         gFrameIndex = 0;
         gMultiGPURestart = false;
 
@@ -513,7 +516,7 @@ public:
 
     void Exit()
     {
-        exitScreenshotInterface();
+        exitScreenshotCapturer();
 
         exitCameraController(pCameraController);
 
@@ -528,11 +531,8 @@ public:
         for (uint32_t i = 0; i < gDataBufferCount; ++i)
         {
             removeResource(pProjViewUniformBuffer[i]);
-            removeResource(pSkyboxUniformBuffer[i]);
         }
-
         removeSampler(pRenderer, pSamplerSkyBox);
-        removeSampler(pRenderer, pCopyQuadSampler);
 
         for (uint32_t view = 0; view < gViewCount; ++view)
         {
@@ -558,7 +558,7 @@ public:
         }
 
         exitSemaphore(pRenderer, pImageAcquiredSemaphore);
-
+        exitRootSignature(pRenderer);
         exitResourceLoaderInterface(pRenderer);
 
         exitRenderer(pRenderer);
@@ -580,7 +580,6 @@ public:
         if (pReloadDesc->mType & RELOAD_TYPE_SHADER)
         {
             addShaders();
-            addRootSignatures();
             addDescriptorSets();
         }
 
@@ -682,7 +681,6 @@ public:
         if (pReloadDesc->mType & RELOAD_TYPE_SHADER)
         {
             removeDescriptorSets();
-            removeRootSignatures();
             removeShaders();
         }
     }
@@ -727,11 +725,13 @@ public:
         currentTime += deltaTime * 1000.0f;
 
         // update camera with time
-        mat4        viewMat = pCameraController->getViewMatrix();
-        const float aspectInverse = (float)mSettings.mHeight / ((float)mSettings.mWidth * 0.5f);
-        const float horizontal_fov = gFoVH * PI / 180.0f;
-        mat4        projMat = mat4::perspectiveLH_ReverseZ(horizontal_fov, aspectInverse, 0.1f, 1000.0f);
-        gUniformData.mProjectView = projMat * viewMat;
+        CameraMatrix viewMat = pCameraController->getViewMatrix();
+        const float  aspectInverse = (float)mSettings.mHeight / ((float)mSettings.mWidth * 0.5f);
+        const float  horizontalFov = gFoVH * PI / 180.0f;
+        const float  nearPlane = 0.1f;
+        const float  farPlane = 1000.0f;
+        CameraMatrix projMat = CameraMatrix::perspectiveReverseZ(horizontalFov, aspectInverse, nearPlane, farPlane);
+        gUniformData.mProjectView = (projMat * viewMat).mCamera;
 
         // point light parameters
         gUniformData.mLightPosition = vec3(0, 0, 0);
@@ -759,9 +759,8 @@ public:
             gUniformData.mColor[i] = gPlanetInfoData[i].mColor;
         }
 
-        gUniformDataSky = gUniformData;
         viewMat.setTranslation(vec3(0));
-        gUniformDataSky.mProjectView = projMat * viewMat;
+        gUniformData.mSkyProjectView = (projMat * viewMat).mCamera;
     }
 
     void Draw()
@@ -796,11 +795,6 @@ public:
         memcpy(viewProjCbv.pMappedData, &gUniformData, sizeof(gUniformData));
         endUpdateResource(&viewProjCbv);
 
-        BufferUpdateDesc skyboxViewProjCbv = { pSkyboxUniformBuffer[gFrameIndex] };
-        beginUpdateResource(&skyboxViewProjCbv);
-        memcpy(skyboxViewProjCbv.pMappedData, &gUniformDataSky, sizeof(gUniformDataSky));
-        endUpdateResource(&skyboxViewProjCbv);
-
         for (int i = gViewCount - 1; i >= 0; --i)
         {
             RenderTarget* pRenderTarget = pRenderTargets[gFrameIndex][i];
@@ -829,7 +823,7 @@ public:
             cmdBeginGpuTimestampQuery(cmd, gGpuProfilerTokens[i], "Draw skybox");
             cmdBindPipeline(cmd, pSkyBoxDrawPipeline);
             cmdBindDescriptorSet(cmd, 0, pDescriptorSetTexture[i]);
-            cmdBindDescriptorSet(cmd, gFrameIndex * 2 + 0, pDescriptorSetUniforms[i]);
+            cmdBindDescriptorSet(cmd, gFrameIndex, pDescriptorSetUniforms[i]);
             cmdBindVertexBuffer(cmd, 1, &pSkyBoxVertexBuffer[i], &skyboxStride, NULL);
             cmdDraw(cmd, 36, 0);
             cmdEndGpuTimestampQuery(cmd, gGpuProfilerTokens[i]);
@@ -838,7 +832,7 @@ public:
             const uint32_t sphereStride = sizeof(float) * 6;
             cmdBeginGpuTimestampQuery(cmd, gGpuProfilerTokens[i], "Draw Planets");
             cmdBindPipeline(cmd, pSpherePipeline);
-            cmdBindDescriptorSet(cmd, gFrameIndex * 2 + 1, pDescriptorSetUniforms[i]);
+            cmdBindDescriptorSet(cmd, gFrameIndex, pDescriptorSetUniforms[i]);
             cmdBindVertexBuffer(cmd, 1, &pSphereVertexBuffer[i], &sphereStride, NULL);
             cmdDrawInstanced(cmd, gNumberOfSpherePoints / 6, 0, gNumPlanets, 0);
             cmdEndGpuTimestampQuery(cmd, gGpuProfilerTokens[i]);
@@ -986,13 +980,13 @@ public:
             }
             else
             {
-                DescriptorSetDesc setDesc = { pRootSignature, DESCRIPTOR_UPDATE_FREQ_NONE, 1, i };
+                DescriptorSetDesc setDesc = SRT_SET_DESC(SrtData, Persistent, 1, 0);
                 addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetTexture[i]);
-                setDesc = { pRootSignature, DESCRIPTOR_UPDATE_FREQ_PER_FRAME, gDataBufferCount * 2, i };
+                setDesc = SRT_SET_DESC(SrtData, PerFrame, gDataBufferCount, 0);
                 addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetUniforms[i]);
             }
         }
-        DescriptorSetDesc setDesc = { pRootSignature, DESCRIPTOR_UPDATE_FREQ_NONE, gDataBufferCount * gViewCount, 0 };
+        DescriptorSetDesc setDesc = SRT_SET_DESC(SrtData, Persistent, gDataBufferCount * gViewCount, 0);
         addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetCopyQuad);
     }
 
@@ -1008,22 +1002,6 @@ public:
         }
         removeDescriptorSet(pRenderer, pDescriptorSetCopyQuad);
     }
-
-    void addRootSignatures()
-    {
-        Shader*           shaders[] = { pSphereShader, pSkyBoxDrawShader, pCopyQuadShader };
-        const char*       staticSamplerNames[] = { "uSampler0", "uCopyQuadSampler" };
-        Sampler*          staticSamplers[] = { pSamplerSkyBox, pCopyQuadSampler };
-        RootSignatureDesc rootDesc = {};
-        rootDesc.mStaticSamplerCount = 2;
-        rootDesc.ppStaticSamplerNames = staticSamplerNames;
-        rootDesc.ppStaticSamplers = staticSamplers;
-        rootDesc.mShaderCount = 3;
-        rootDesc.ppShaders = shaders;
-        addRootSignature(pRenderer, &rootDesc, &pRootSignature);
-    }
-
-    void removeRootSignatures() { removeRootSignature(pRenderer, pRootSignature); }
 
     void addShaders()
     {
@@ -1086,7 +1064,6 @@ public:
         pipelineSettings.mSampleCount = pSwapChain->ppRenderTargets[0]->mSampleCount;
         pipelineSettings.mSampleQuality = pSwapChain->ppRenderTargets[0]->mSampleQuality;
         pipelineSettings.mDepthStencilFormat = pDepthBuffers[0]->mFormat;
-        pipelineSettings.pRootSignature = pRootSignature;
         pipelineSettings.pShaderProgram = pSphereShader;
         pipelineSettings.pVertexLayout = &vertexLayout;
         pipelineSettings.pRasterizerState = &rasterizerStateDesc;
@@ -1143,29 +1120,29 @@ public:
             if (i > 0 && pDescriptorSetTexture[i] == pDescriptorSetTexture[0])
                 continue;
 
-            DescriptorData params[6] = {};
-            params[0].pName = "RightText";
+            DescriptorData params[7] = {};
+            params[0].mIndex = SRT_RES_IDX(SrtData, Persistent, gRightText);
             params[0].ppTextures = &pSkyBoxTextures[i][0];
-            params[1].pName = "LeftText";
+            params[1].mIndex = SRT_RES_IDX(SrtData, Persistent, gLeftText);
             params[1].ppTextures = &pSkyBoxTextures[i][1];
-            params[2].pName = "TopText";
+            params[2].mIndex = SRT_RES_IDX(SrtData, Persistent, gTopText);
             params[2].ppTextures = &pSkyBoxTextures[i][2];
-            params[3].pName = "BotText";
+            params[3].mIndex = SRT_RES_IDX(SrtData, Persistent, gBotText);
             params[3].ppTextures = &pSkyBoxTextures[i][3];
-            params[4].pName = "FrontText";
+            params[4].mIndex = SRT_RES_IDX(SrtData, Persistent, gFrontText);
             params[4].ppTextures = &pSkyBoxTextures[i][4];
-            params[5].pName = "BackText";
+            params[5].mIndex = SRT_RES_IDX(SrtData, Persistent, gBackText);
             params[5].ppTextures = &pSkyBoxTextures[i][5];
-            updateDescriptorSet(pRenderer, 0, pDescriptorSetTexture[i], 6, params);
+            params[6].mIndex = SRT_RES_IDX(SrtData, Persistent, gSamplerSkybox);
+            params[6].ppSamplers = &pSamplerSkyBox;
+            updateDescriptorSet(pRenderer, 0, pDescriptorSetTexture[i], 7, params);
 
             for (uint32_t f = 0; f < gDataBufferCount; ++f)
             {
                 DescriptorData uParams[1] = {};
-                uParams[0].pName = "uniformBlock";
-                uParams[0].ppBuffers = &pSkyboxUniformBuffer[f];
-                updateDescriptorSet(pRenderer, f * 2 + 0, pDescriptorSetUniforms[i], 1, uParams);
+                uParams[0].mIndex = SRT_RES_IDX(SrtData, PerFrame, gUniformBlock);
                 uParams[0].ppBuffers = &pProjViewUniformBuffer[f];
-                updateDescriptorSet(pRenderer, f * 2 + 1, pDescriptorSetUniforms[i], 1, uParams);
+                updateDescriptorSet(pRenderer, f, pDescriptorSetUniforms[i], 1, uParams);
             }
         }
 
@@ -1174,7 +1151,7 @@ public:
             for (uint32_t view = 0; view < gViewCount; ++view)
             {
                 DescriptorData copyQuadParams[1] = {};
-                copyQuadParams[0].pName = "uTex";
+                copyQuadParams[0].mIndex = SRT_RES_IDX(SrtData, Persistent, gTex);
                 copyQuadParams[0].ppTextures = &pRenderTargets[f][view]->pTexture;
                 updateDescriptorSet(pRenderer, f * gViewCount + view, pDescriptorSetCopyQuad, 1, copyQuadParams);
             }

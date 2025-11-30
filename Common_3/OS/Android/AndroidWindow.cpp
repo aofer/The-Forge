@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -33,10 +33,6 @@
 #include "../../Utilities/Interfaces/ILog.h"
 #include "../Interfaces/IOperatingSystem.h"
 #include "../../Utilities/ThirdParty/OpenSource/Nothings/stb_ds.h"
-
-#if defined(QUEST_VR)
-#include "../Quest/VrApi.h"
-#endif
 
 // NOTE: We have to define all functions so that their refernces in
 // WindowSystem are properly resolved.
@@ -255,15 +251,23 @@ void handle_cmd(android_app* app, int32_t cmd)
     {
         ANDROID_FLUSH_LOG("init window")
 
-#if !defined(QUEST_VR)
-        int32_t screenWidth = ANativeWindow_getWidth(app->window);
-        int32_t screenHeight = ANativeWindow_getHeight(app->window);
-#else
-        int32_t screenWidth = pQuest->mEyeTextureWidth;
-        int32_t screenHeight = pQuest->mEyeTextureHeight;
-#endif
-
         IApp::Settings* pSettings = &pWindowAppRef->mSettings;
+#if !defined(QUEST_VR)
+        // NOTE: On some devices we noticed that window might be not ready at the beginning of this event
+        // In such case dimensions(1x1) for the default dummy window would be returned instead, so we have to wait here for native window
+        // being actually ready
+        // We noticed this issue on Google Pixel 6 and Samsung Galaxy Tab S7
+        int32_t screenWidth = 1;
+        int32_t screenHeight = 1;
+        while (screenWidth == 1 && screenHeight == 1)
+        {
+            screenWidth = ANativeWindow_getWidth(app->window);
+            screenHeight = ANativeWindow_getHeight(app->window);
+        }
+#else
+        int32_t screenWidth = pSettings->mWidth;
+        int32_t screenHeight = pSettings->mHeight;
+#endif
         gWindow.windowedRect = { 0, 0, screenWidth, screenHeight };
         gWindow.fullScreen = pSettings->mFullScreen;
         gWindow.maximized = false;
@@ -297,15 +301,15 @@ void handle_cmd(android_app* app, int32_t cmd)
     }
     case APP_CMD_WINDOW_RESIZED:
     {
+        IApp::Settings* pSettings = &pWindowAppRef->mSettings;
 #if !defined(QUEST_VR)
         int32_t screenWidth = ANativeWindow_getWidth(app->window);
         int32_t screenHeight = ANativeWindow_getHeight(app->window);
 #else
-        int32_t screenWidth = pQuest->mEyeTextureWidth;
-        int32_t screenHeight = pQuest->mEyeTextureHeight;
+        int32_t screenWidth = pSettings->mWidth;
+        int32_t screenHeight = pSettings->mHeight;
 #endif
 
-        IApp::Settings* pSettings = &pWindowAppRef->mSettings;
         if (pSettings->mWidth != screenWidth || pSettings->mHeight != screenHeight)
         {
             gWindow.windowedRect = { 0, 0, screenWidth, screenHeight };

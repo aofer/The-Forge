@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2017-2024 The Forge Interactive Inc.
+* Copyright (c) 2017-2025 The Forge Interactive Inc.
 *
 * This file is part of The-Forge
 * (see https://github.com/ConfettiFX/The-Forge).
@@ -59,7 +59,7 @@ inline float2 f2(uint x) { return float2(x, x); }
 #define ushort2 uint2
 #define ushort  uint
 
-#if !defined(DIRECT3D12) && !defined(DIRECT3D11)
+#if !defined(DIRECT3D12) 
 #define min16float half
 #define min16float2 half2
 #define min16float3 half3
@@ -203,7 +203,7 @@ f2x2 setRow(inout f2x2 M, in float2 row, const uint i) { M[i] = row; return M; }
     #define RETURN return
 #endif
 
-// #if defined(DIRECT3D12) || defined(DIRECT3D11)
+// #if defined(DIRECT3D12) 
 //     #define FSL_VertexID(NAME)         uint  NAME : SV_VertexID
 //     #define SV_InstanceID(NAME)        uint  NAME : SV_InstanceID
 //     #define FSL_GroupID(NAME)          uint3 NAME : SV_GroupID
@@ -232,7 +232,7 @@ f2x2 setRow(inout f2x2 M, in float2 row, const uint i) { M[i] = row; return M; }
 //     return all(a > float2(b, b));
 // }
 
-#if defined( DIRECT3D11 ) || defined( ORBIS )
+#if defined( ORBIS )
 bool2 And(const bool2 a, const bool2 b)
 { return a && b; }
 #else
@@ -289,7 +289,7 @@ uint insert_bits(uint src, uint ins, uint off, uint bits)
 #define NonUniformResourceIndex(X) (X)
 #endif
 
-// #if defined(DIRECT3D12) || defined(DIRECT3D11)
+// #if defined(DIRECT3D12)
 //     #define GroupMemoryBarrier GroupMemoryBarrierWithGroupSync
 //     #define AllMemoryBarrier AllMemoryBarrierWithGroupSync
 // #else
@@ -338,7 +338,7 @@ EXPR(uint) \
 EXPR(half) \
 EXPR(float)
 
-#if defined(DIRECT3D12) || defined(DIRECT3D11)
+#if defined(DIRECT3D12) 
 // #define _DECL_AtomicAdd(TYPE) \
 // inline void AtomicAdd(inout TYPE dst, TYPE value, out TYPE original_val) \
 // { InterlockedAdd(dst, value, original_val); }
@@ -434,12 +434,6 @@ _DECL_TYPES(_DECL_AtomicStore)
 
 #define NUM_THREADS(X, Y, Z) [numthreads(X, Y, Z)]
 
-#define UPDATE_FREQ_NONE      space0
-#define UPDATE_FREQ_PER_FRAME space1
-#define UPDATE_FREQ_PER_BATCH space2
-#define UPDATE_FREQ_PER_DRAW  space3
-#define UPDATE_FREQ_USER      UPDATE_FREQ_NONE
-
 #define FLAT(X) nointerpolation X
 #define CENTROID(X) centroid X
 
@@ -519,7 +513,7 @@ float4  _to4(in float x)    { return float4(x, 0, 0, 0); }
 // #define LoadTex2D(TEX, SMP, P) ((TEX)[P])
 // #else
 // inline TYPE LoadTex2D(RWTexture2D<TYPE> tex, SamplerState smp, int2 p) { return tex.Load(p); }
-// #if 0 && (defined(DIRECT3D12) || defined(DIRECT3D11))
+// #if 0 && (defined(DIRECT3D12) 
 // #define _DECL_LoadTex2D(TYPE) \
 // inline TYPE LoadTex2D(Texture2D<TYPE>   tex, SamplerState smp, int2 p) { return tex.Load(int3(p, 0)); } \
 // inline TYPE LoadTex2D(RWTexture2D<TYPE> tex, SamplerState smp, int2 p) { return tex[p]; } \
@@ -720,7 +714,7 @@ _DECL_AtomicMax2D(uint)
 // { InterlockedMin(tex[int3(p, layer)], val, original_val); }
 // _DECL_AtomicMin2DArray(uint)
 
-#if defined(DIRECT3D11) || defined(DIRECT3D12)
+#if defined(DIRECT3D12)
     #define AtomicMin InterlockedMin
     #define AtomicMax InterlockedMax
 #endif
@@ -738,13 +732,6 @@ _DECL_AtomicMax2D(uint)
 #define LOOP [loop]
 #define FLATTEN [flatten]
 
-#if defined(ORBIS) || defined(PROSPERO)
-#define ROOT_CONSTANT(T) T
-#elif defined(DIRECT3D11)
-#define ROOT_CONSTANT(T) cbuffer
-#else
-#define ROOT_CONSTANT(T) ConstantBuffer<T>
-#endif
 
 
 #if defined(ORBIS) || defined(PROSPERO)
@@ -797,11 +784,7 @@ inline int2 GetDimensions(TextureCube t, SamplerState smp) { return GetDimension
 #define Tex2D(ELEM_TYPE) Texture2D<ELEM_TYPE>
 #define Tex3D(ELEM_TYPE) Texture3D<ELEM_TYPE>
 
-#if defined(DIRECT3D11)
-    #define Tex2DMS(ELEM_TYPE, SMP_CNT) Texture2DMS<ELEM_TYPE>
-#else
-    #define Tex2DMS(ELEM_TYPE, SMP_CNT) Texture2DMS<ELEM_TYPE, SMP_CNT>
-#endif
+#define Tex2DMS(ELEM_TYPE, SMP_CNT) Texture2DMS<ELEM_TYPE, SMP_CNT>
 
 #define Tex1DArray(ELEM_TYPE) Texture1DArray<ELEM_TYPE>
 #define Tex2DArray(ELEM_TYPE) Texture2DArray<ELEM_TYPE>
@@ -846,13 +829,10 @@ inline int2 GetDimensions(TextureCube t, SamplerState smp) { return GetDimension
 
 #if defined(DIRECT3D12)
     #define CBUFFER(T) ConstantBuffer<T>
-    #define RES(TYPE, NAME, FREQ, REG, BINDING) TYPE NAME : register(REG, FREQ)
 #elif defined(ORBIS) || defined(PROSPERO)
     #define CBUFFER(T) T
-    #define RES(TYPE, NAME, FREQ, REG, BINDING)
 #else
     #define CBUFFER(T) cbuffer
-    #define RES(TYPE, NAME, FREQ, REG, BINDING) TYPE NAME : register(REG)
 #endif
 
 
@@ -884,7 +864,7 @@ inline int2 GetDimensions(TextureCube t, SamplerState smp) { return GetDimension
     [outputtopology(T)]
 #endif
 
-#if defined(DIRECT3D12) || defined(DIRECT3D11)
+#if defined(DIRECT3D12) 
 #define FSL_DomainLocation(N) float3 N : SV_DomainLocation
 #else
 #define FSL_DomainLocation(N) float2 N : SV_DomainLocation
@@ -905,15 +885,11 @@ inline int2 GetDimensions(TextureCube t, SamplerState smp) { return GetDimension
 
 #endif
 
-#ifdef DIRECT3D11
-#define EnablePSInterlock
-#define BeginPSInterlock
-#define EndPSInterlock
-#else
+
 #define EnablePSInterlock()
 #define BeginPSInterlock()
 #define EndPSInterlock()
-#endif
+
 
 #ifndef STAGE_VERT
     #define VR_VIEW_ID(VID) (0)
@@ -921,5 +897,21 @@ inline int2 GetDimensions(TextureCube t, SamplerState smp) { return GetDimension
     #define VR_VIEW_ID 0
 #endif
 #define VR_MULTIVIEW_COUNT 1
+
+#if defined(DIRECT3D12)
+#define ADDRESS_MODE_REPEAT TEXTURE_ADDRESS_MODE_WRAP
+#define ADDRESS_MODE_MIRROR TEXTURE_ADDRESS_MODE_MIRROR
+#define ADDRESS_MODE_CLAMP_TO_EDGE TEXTURE_ADDRESS_MODE_CLAMP
+#define ADDRESS_MODE_CLAMP_TO_BORDER TEXTURE_ADDRESS_MODE_BORDER
+
+#define CMP_NEVER COMPARISON_FUNC_NONE
+#define CMP_LESS COMPARISON_FUNC_LESS
+#define CMP_EQUAL COMPARISON_FUNC_EQUAL
+#define CMP_LEQUAL COMPARISON_FUNC_LESS_EQUAL
+#define CMP_GREATER COMPARISON_FUNC_GREATER
+#define CMP_NOTEQUAL COMPARISON_FUNC_NOT_EQUAL
+#define CMP_GEQUAL COMPARISON_FUNC_GREATER_EQUAL
+#define CMP_ALWAYS COMPARISON_FUNC_ALWAYS
+#endif
 
 #endif // _D3D_H

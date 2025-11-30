@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  * 
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -22,9 +22,16 @@
  * under the License.
 */
 
-#include "Shader_Defs.h.fsl"
-#include "vb_resources.h.fsl"
+#include "ShaderDefs.h.fsl"
+#include "VisibiltyBufferResources.h.fsl"
+#include "Global.srt.h"
 
+STRUCT(PsOut)
+{
+    DATA(float4, VBData,       SV_Target0);
+};
+
+ROOT_SIGNATURE(DefaultRootSignature)
 PsOut PS_MAIN( PsInAlphaTested In, SV_PrimitiveID(uint) primitiveID )
 {
 	INIT_MAIN;
@@ -33,11 +40,10 @@ PsOut PS_MAIN( PsInAlphaTested In, SV_PrimitiveID(uint) primitiveID )
 	float4 texColor = f4(0);
 
 	BeginNonUniformResourceIndex(materialID, MAX_TEXTURE_UNITS);
-    	texColor = SampleLvlTex2D(diffuseMaps[materialID], nearClampSampler, In.texCoord, 0);
+    	texColor = SampleLvlTex2D(gDiffuseMaps[materialID], gSamplerPointClamp, In.texCoord, 0);
 	EndNonUniformResourceIndex();
 
 	clip(texColor.a < 0.5f ? -1 : 1);
 	Out.VBData = unpackUnorm4x8(PACK_VB_DATA(GEOMSET_ALPHA_CUTOUT, primitiveID));
-	Out.MotionVector = In.currPosition.xy / In.currPosition.w - In.prevPosition.xy / In.prevPosition.w;
 	RETURN(Out);
 }

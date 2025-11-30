@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -24,7 +24,7 @@
 
 #pragma once
 
-#if FT_RAYTRACING && !defined(TARGET_SCARLETT)
+#if FT_RAYTRACING && !defined(TARGET_SCARLETT) && !defined(TARGET_XBOX)
 
 // Ray query interface
 
@@ -57,6 +57,7 @@ bool hit##HasHitCandidates = hit.Proceed();
 #define RayQueryBeginForEachCandidate(hit) while (hit##HasHitCandidates)
 #define RayQueryEndForEachCandidate(hit)
 #define RayQueryIsHit(hit) (hit.CommittedStatus() != COMMITTED_NOTHING)
+#define RayQueryIsHitTriangle(hit) (hit.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
 #define RayQueryIsHitNonOpaqueTriangle(hit) (hit.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
 #define RayQueryCommitCandidate(hit) hit.CommitNonOpaqueTriangleHit();
 #define RayQueryProceed(hit) hit##HasHitCandidates = hit.Proceed();
@@ -65,6 +66,8 @@ bool hit##HasHitCandidates = hit.Proceed();
 #define RayQueryPrimitiveIndex(hit) (hit.CommittedPrimitiveIndex())
 #define RayQueryInstanceID(hit) (hit.CommittedInstanceID())
 #define RayQueryGeometryIndex(hit) (hit.CommittedGeometryIndex())
+#define RayQueryInstanceIndex(hit) (hit.CommittedInstanceIndex())
+#define RayQueryRayT(hit) (hit.CommittedRayT())
 
 #define RayQueryCandidateBarycentrics(hit) (hit.CandidateTriangleBarycentrics())
 #define RayQueryCandidatePrimitiveIndex(hit) (hit.CandidatePrimitiveIndex())

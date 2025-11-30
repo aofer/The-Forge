@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -22,16 +22,23 @@
  * under the License.
  */
 
-#include "Shader_Defs.h.fsl"
-#include "vb_resources.h.fsl"
+#include "ShaderDefs.h.fsl"
+#include "VisibilityBufferResources.h.fsl"
+#include "VisibilityBuffer.srt.h"
+#include "VisibilityBufferResourcesUtil.h.fsl"
 
+ROOT_SIGNATURE(DefaultRootSignature)
 PsInOpaque VS_MAIN(SV_VertexID(uint) vertexID)
 {
     INIT_MAIN;
     PsInOpaque Out;
 
     float4 vertexPos = LoadVertex(vertexID);
-    Out.position = mul(objectUniformBlock.worldViewProjMat, vertexPos);
+	#if FT_MULTIVIEW
+		Out.position = mul(gObjectUniformBlockPerDraw.mWorldViewProjMat.mat[VR_VIEW_ID], vertexPos);
+	#else
+		Out.position = mul(gObjectUniformBlockPerDraw.mWorldViewProjMat.mat, vertexPos);
+	#endif
 
 #ifdef GPU_CRASH
 	// Causing a GPU hang...

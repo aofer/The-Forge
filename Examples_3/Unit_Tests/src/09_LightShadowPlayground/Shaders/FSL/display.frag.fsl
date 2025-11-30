@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  * 
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -22,20 +22,30 @@
  * under the License.
 */
 
-RES(Tex2D(float4), SourceTexture, UPDATE_FREQ_NONE, t0, binding = 0);
-RES(SamplerState, repeatBillinearSampler, UPDATE_FREQ_NONE, s1, binding = 1);
+#include "VisibilityBufferResources.h.fsl"
+#include "Display.srt.h"
+
+
 
 STRUCT(PsIn)
 {
 	DATA(float4, position, SV_Position);
 	DATA(float2, texCoord, TEXCOORD);
+#if FT_MULTIVIEW
+    DATA(FLAT(uint), ViewID, TEXCOORD3);
+#endif
 };
 
+ROOT_SIGNATURE(DefaultRootSignature)
 float4 PS_MAIN( PsIn In )
 {
 	INIT_MAIN;
 	float4 Out;
-	float4 sceneColor = SampleTex2D(SourceTexture, repeatBillinearSampler, In.texCoord);
+#if FT_MULTIVIEW
+    float4 sceneColor = SampleTex2DArray(gSourceTexture, gSamplerBilinearWrap, float3(In.texCoord, In.ViewID));
+#else
+    float4 sceneColor = SampleTex2D(gSourceTexture, gSamplerBilinearWrap, In.texCoord);
+#endif
 	Out = float4(sceneColor.rgb, 1.0);
 	RETURN(Out);
 }

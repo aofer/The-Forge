@@ -1,6 +1,6 @@
 /*
  *
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -52,7 +52,19 @@
 #include "../../../../Common_3/Utilities/RingBuffer.h"
 #include "../../../Visibility_Buffer/src/SanMiguel.h"
 
-#include "Shaders/FSL/shader_defs.h.fsl"
+// fsl
+#define NO_FSL_DEFINITIONS
+#include "../../../../Common_3/Graphics/FSL/fsl_srt.h"
+#include "Shaders/FSL/ShaderDefs.h.fsl"
+#include "../../../../Common_3/Graphics/FSL/defaults.h"
+#include "./Shaders/FSL/Global.srt.h"
+#include "./Shaders/FSL/ShadowPass.srt.h"
+#include "./Shaders/FSL/ShadowFiltering.srt.h"
+#include "./Shaders/FSL/TriangleFiltering.srt.h"
+#include "./Shaders/FSL/LightClusters.srt.h"
+#include "./Shaders/FSL/Particle.srt.h"
+#include "./Shaders/FSL/VisibilityBufferShade.srt.h"
+
 #include "../../../../Common_3/Utilities/Math/ShaderUtilities.h"
 #include "../../../../Common_3/Utilities/Interfaces/IMemory.h" // Must be the last include in a cpp file
 
@@ -63,8 +75,11 @@
 #define RESOLUTION_FACTOR 1.0f
 #endif
 
-#define DEFAULT_PARTICLE_SETS_COUNT 8
-#define PARTICLE_TEXTURES_COUNT     2
+#define CUBE_FACE_SIZE              6
+
+#define DEFAULT_PARTICLE_SETS_COUNT 5
+#define PARTICLE_TEXTURES_COUNT     4
+#define STATS_COLLECTION_FREQUENCY  30
 
 #define pack2Floats(x, y)           (half(x).sh | (half(y).sh << 16))
 
@@ -73,18 +88,11 @@
 #endif
 
 #define SHADOWMAP_SIZE 2048
-#if defined(ORBIS)
-#define MAX_TRANSPARENCY_LAYERS 20
-#elif (defined(PROSPERO) || defined(WINDOWS)) && defined(AUTOMATED_TESTING)
-#define MAX_TRANSPARENCY_LAYERS 64
-#else
-#define MAX_TRANSPARENCY_LAYERS 24
-#endif
 
 #define FOREACH_SETTING(X)       \
     X(BindlessSupported, 1)      \
     X(AddGeometryPassThrough, 0) \
-    X(OITSupported, 1)
+    X(UseRelaxedThreadGroups, 0)
 
 #define GENERATE_ENUM(x, y)   x,
 #define GENERATE_STRING(x, y) #x,
@@ -115,6 +123,15 @@ struct ConfigSettings
 const uint32_t gDataBufferCount = 2;
 uint2          gAppResolution;
 
+// Thread local group sizes
+#define RELAXED_LOCAL_GROUP_SIZE 16
+bool gUseLocalGroupRelaxed = false;
+
+uint32_t gLightClusterWidth = LIGHT_CLUSTER_WIDTH;
+uint32_t gLightClusterHeight = LIGHT_CLUSTER_HEIGHT;
+
+uint32_t gMaxParticlesCount = MAX_PARTICLES_COUNT_HIGH;
+
 /*****************************************************/
 /****************Particle System data*****************/
 /*****************************************************/
@@ -131,9 +148,8 @@ Buffer* pTransparencyListBuffer = NULL;
 Buffer* pTransparencyListHeadBuffer = NULL;
 
 // Default ParticleSets that are uploaded once to start the simulation and never touched again
-#if !defined(ENABLE_REMOTE_STREAMING)
-ParticleSet* pParticleSets = NULL;
-#endif
+ParticleSet* pDefaultParticleSets = NULL;
+uint32_t*    pDefaultBitfields = NULL;
 
 // Particle textures
 Texture* ppParticleTextures[PARTICLE_TEXTURES_COUNT] = { NULL };
@@ -147,23 +163,21 @@ Texture*      pFilteredShadowCollector = NULL;
 /******************************************************/
 // Fireflies
 /******************************************************/
-float gFirefliesFlockRadius = 4.0f;
+float gFirefliesFlockRadius = 5.0f;
 float gFirefliesMinHeight = 1.5f;
 float gFirefliesMaxHeight = 6.0f;
 
-float gFirefliesElevationSpeed = 0.3f;
-float gFirefliesWhirlSpeed = 0.3f;
+float gFirefliesElevationSpeeds[MAX_PARTICLE_ATTRACTORS_COUNT] = { 0.1f, 0.15f, 0.2f, 0.1f };
+float gFirefliesWhirlSpeeds[MAX_PARTICLE_ATTRACTORS_COUNT] = { -0.3f, 0.4f, -0.8f, 0.6f };
 
-float gFirefliesWhirlAngle = 0.5f;
-float gFirefliesElevationT = 0.5f;
+float gFirefliesWhirlAngles[MAX_PARTICLE_ATTRACTORS_COUNT] = { 0.0f, PI / 4, PI / 2, (3 * PI) / 2 };
+float gFirefliesElevationTs[MAX_PARTICLE_ATTRACTORS_COUNT] = { 0.0f, 0.25f, 0.5f, 0.25f };
 
 /******************************************************/
 // Shadowmap filtering
 /******************************************************/
-Pipeline*      pPipelineFilterShadows = NULL;
-Shader*        pShaderFilterShadows = NULL;
-RootSignature* pRootSignatureFilterShadows = NULL;
-DescriptorSet* pDescriptorSetFilterShadows = NULL;
+Pipeline* pPipelineFilterShadows = NULL;
+Shader*   pShaderFilterShadows = NULL;
 
 float2 gSunControl = { -1.556f, -0.58f };
 float  gESMControl = 50.0f;
@@ -180,7 +194,7 @@ bool gAsyncComputeEnabled = DEFAULT_ASYNC_COMPUTE;
 // True after 10 seconds since the start of the app
 bool gParticlesLoaded = false;
 
-#if defined(FORGE_DEBUG)
+#if defined(FORGE_DEBUG) && !defined(AUTOMATED_TESTING)
 bstring gParticleStatsText = bempty();
 #endif
 
@@ -222,84 +236,88 @@ Semaphore*        pImageAcquiredSemaphore = NULL;
 Semaphore*        pPresentSemaphore = NULL;
 Semaphore*        gPrevGraphicsSemaphore = NULL;
 Semaphore*        gComputeSemaphores[gDataBufferCount] = {};
+
+/************************************************************************/
+// descriptor sets
+/************************************************************************/
+DescriptorSet* pDescriptorSetPersistent = NULL;
+DescriptorSet* pDescriptorSetPerFrame = NULL;
+DescriptorSet* pDescriptorSetParticlePerBatch = NULL;
+DescriptorSet* pDescriptorSetTriangleFilteringPerBatch = NULL;
+DescriptorSet* pDescriptorSetClusterLightsPerBatch = NULL;
+DescriptorSet* pDescriptorSetVisibilityBufferShadePerBatch = NULL;
 /************************************************************************/
 // Clear buffers pipeline
 /************************************************************************/
-Shader*           pShaderClearBuffers = NULL;
-Pipeline*         pPipelineClearBuffers = NULL;
-RootSignature*    pRootSignatureClearBuffers = NULL;
-DescriptorSet*    pDescriptorSetClearBuffers = NULL;
+Shader*        pShaderClearBuffers = NULL;
+Pipeline*      pPipelineClearBuffers = NULL;
 /************************************************************************/
 // Triangle filtering pipeline
 /************************************************************************/
-Shader*           pShaderTriangleFiltering = NULL;
-Pipeline*         pPipelineTriangleFiltering = NULL;
-RootSignature*    pRootSignatureTriangleFiltering = NULL;
-DescriptorSet*    pDescriptorSetTriangleFiltering[2] = { NULL };
+Shader*        pShaderTriangleFiltering = NULL;
+Pipeline*      pPipelineTriangleFiltering = NULL;
 /************************************************************************/
 // Clear light clusters pipeline
 /************************************************************************/
-Shader*           pShaderClearLightClusters = NULL;
-Pipeline*         pPipelineClearLightClusters = NULL;
-RootSignature*    pRootSignatureLightClusters = NULL;
-DescriptorSet*    pDescriptorSetLightClusters[2] = { NULL };
+Shader*        pShaderClearLightClusters = NULL;
+Pipeline*      pPipelineClearLightClusters = NULL;
 /************************************************************************/
 // "Downsample" depth buffer pipeline
 /************************************************************************/
-Shader*           pShaderDownsampleDepth = NULL;
-Pipeline*         pPipelineDownsampleDepth = NULL;
-DescriptorSet*    pDescriptorSetDownsampleDepth = NULL;
-RenderTarget*     pRenderTargetDownsampleDepth = NULL;
-RootSignature*    pRootSignatureDownsampleDepth = NULL;
-uint32_t          gDownsamplePushConstantsIndex = 0;
+Shader*        pShaderDownsampleDepth = NULL;
+Pipeline*      pPipelineDownsampleDepth = NULL;
+RenderTarget*  pRenderTargetDownsampleDepth = NULL;
+uint32_t       gDownsamplePushConstantsIndex = 0;
 /************************************************************************/
 // Compute depth bounds pipeline
 /************************************************************************/
-Shader*           pShaderComputeDepthBounds = NULL;
-Shader*           pShaderComputeDepthCluster = NULL;
-Pipeline*         pPipelineComputeDepthBounds = NULL;
-Pipeline*         pPipelineComputeDepthCluster = NULL;
-Buffer*           pDepthBoundsBuffer = NULL;
-uint32_t          gDepthBoundsPushConstsIndex = 0;
+Shader*        pShaderComputeDepthBounds = NULL;
+Shader*        pShaderComputeDepthCluster = NULL;
+Pipeline*      pPipelineComputeDepthBounds = NULL;
+Pipeline*      pPipelineComputeDepthCluster = NULL;
+Buffer*        pDepthBoundsBuffer = NULL;
+uint32_t       gDepthBoundsPushConstsIndex = 0;
 /************************************************************************/
 // Compute light clusters pipeline
 /************************************************************************/
-Shader*           pShaderClusterLights = NULL;
-Pipeline*         pPipelineClusterLights = NULL;
+Shader*        pShaderClusterLights = NULL;
+Pipeline*      pPipelineClusterLights = NULL;
 /************************************************************************/
 // Shadow pass pipeline
 /************************************************************************/
-Shader*           pShaderShadowPass[NUM_GEOMETRY_SETS] = { NULL };
-Pipeline*         pPipelineShadowPass[NUM_GEOMETRY_SETS] = { NULL };
+Shader*        pShaderShadowPass[NUM_GEOMETRY_SETS] = { NULL };
+Pipeline*      pPipelineShadowPass[NUM_GEOMETRY_SETS] = { NULL };
 /************************************************************************/
 // VB pass pipeline
 /************************************************************************/
-Shader*           pShaderVisibilityBufferPass[NUM_GEOMETRY_SETS] = {};
-Pipeline*         pPipelineVisibilityBufferPass[NUM_GEOMETRY_SETS] = {};
-RootSignature*    pRootSignatureVBPass = NULL;
-DescriptorSet*    pDescriptorSetVBPass[2] = { NULL };
+Shader*        pShaderVisibilityBufferPass[NUM_GEOMETRY_SETS] = {};
+Pipeline*      pPipelineVisibilityBufferPass[NUM_GEOMETRY_SETS] = {};
 /************************************************************************/
 // VB shade pipeline
 /************************************************************************/
-Shader*           pShaderVisibilityBufferShade = NULL;
-Pipeline*         pPipelineVisibilityBufferShadeSrgb = NULL;
-RootSignature*    pRootSignatureVBShade = NULL;
-DescriptorSet*    pDescriptorSetVBShade[2] = { NULL };
+Shader*        pShaderVisibilityBufferShade = NULL;
+Pipeline*      pPipelineVisibilityBufferShadeSrgb = NULL;
 /************************************************************************/
 // Clean texture pipeline
 /************************************************************************/
-Shader*           pShaderCleanTexture = NULL;
-Pipeline*         pPipelineCleanTexture = NULL;
-RootSignature*    pRootSignatureCleanTexture = NULL;
-DescriptorSet*    pDescriptorSetCleanTexture = NULL;
+Shader*        pShaderCleanTexture = NULL;
+Pipeline*      pPipelineCleanTexture = NULL;
+
+/************************************************************************/
+// Particles shaders and pipeline
+/************************************************************************/
+Shader* pParticleRenderShader = NULL;
+Shader* pParticleSimulateShader = NULL;
+
+Pipeline* pParticleRenderPipeline = NULL;
+Pipeline* pParticleSimulatePipeline = NULL;
+
 /************************************************************************/
 // Present pipeline
 /************************************************************************/
-Shader*           pShaderPresent = NULL;
-Pipeline*         pPipelinePresent = NULL;
-RootSignature*    pRootSignaturePresent = NULL;
-DescriptorSet*    pDescriptorSetPresent = NULL;
-uint32_t          gPresentPushConstantsIndex = 0;
+Shader*   pShaderPresent = NULL;
+Pipeline* pPipelinePresent = NULL;
+uint32_t  gPresentPushConstantsIndex = 0;
 
 /************************************************************************/
 // Render targets
@@ -316,7 +334,8 @@ Sampler*         pSamplerTrilinearAniso = NULL;
 Sampler*         pSamplerBilinear = NULL;
 Sampler*         pSamplerPointClamp = NULL;
 Sampler*         pSamplerBilinearClamp = NULL;
-Sampler*         pPointClampSampler = NULL;
+Sampler*         pPointClampBorderSampler = NULL;
+Sampler*         pSamplerBilinearClampMipless = NULL;
 /************************************************************************/
 // Bindless texture array
 /************************************************************************/
@@ -339,9 +358,15 @@ enum
     VB_UB_GRAPHICS,
     VB_UB_COUNT
 };
-Buffer* pPerFrameVBUniformBuffers[VB_UB_COUNT][gDataBufferCount] = {};
+
+#define SHADOW_CONSTANTS_BUFFERS_COUNT (7 * MAX_SHADOW_COUNT)
+Buffer*        pPerFrameVBUniformBuffers[VB_UB_COUNT][gDataBufferCount] = {};
+DescriptorSet* pDescriptorSetShadowFilteringPerDraw = NULL;
+Buffer*        pShadowFilteringConstantsUniformBuffers[gDataBufferCount][2] = {};
+DescriptorSet* pDescriptorSetShadowConstantsPerDraw = NULL;
+Buffer*        pShadowConstantsBuffers[gDataBufferCount][SHADOW_CONSTANTS_BUFFERS_COUNT] = {};
 // Buffers containing all indirect draw commands per geometry set (no culling)
-Buffer* pMeshConstantsBuffer = NULL;
+Buffer*        pMeshConstantsBuffer = NULL;
 
 /************************************************************************/
 // Other buffers for lighting, point lights,...
@@ -400,22 +425,27 @@ public:
         // check for init success
         if (!pRenderer)
         {
-            ShowUnsupportedMessage("Failed To Initialize renderer!");
+            ShowUnsupportedMessage(getUnsupportedGPUMsg());
             return false;
         }
         setupGPUConfigurationPlatformParameters(pRenderer, settings.pExtendedSettings);
 
-        if (!gGpuSettings.mBindlessSupported)
+        if (gGpuSettings.mUseRelaxedThreadGroups)
         {
-            ShowUnsupportedMessage("Visibility Buffer does not run on this device. Doesn't support enough bindless texture entries");
-            return false;
+            LOGF(LogLevel::eWARNING,
+                 "Product of local group sizes exceeds allowed limit of %u. Using relaxed (16, 16) local "
+                 "group size instead",
+                 pRenderer->pGpu->mMaxTotalComputeThreads);
+
+            gUseLocalGroupRelaxed = true;
+
+            gLightClusterWidth = RELAXED_LOCAL_GROUP_SIZE;
+            gLightClusterHeight = RELAXED_LOCAL_GROUP_SIZE;
         }
 
-        if (!gGpuSettings.mOITSupported)
+        if (pRenderer->pGpu->mGpuVendorPreset.mPresetLevel <= GPU_PRESET_LOW)
         {
-            ShowUnsupportedMessage(
-                "Order Independent Transparency does not work on this device. Adreno doesn't support big enough storage buffers.");
-            return false;
+            gMaxParticlesCount = MAX_PARTICLES_COUNT_LOW;
         }
 
         QueueDesc queueDesc = {};
@@ -450,6 +480,10 @@ public:
         /************************************************************************/
         initResourceLoaderInterface(pRenderer);
 
+        RootSignatureDesc rootDesc = {};
+        INIT_RS_DESC(rootDesc, "default.rootsig", "compute.rootsig");
+        initRootSignature(pRenderer, &rootDesc);
+
         // Load fonts
         FontDesc font = {};
         font.pFontPath = "TitilliumText/TitilliumText-Bold.otf";
@@ -466,7 +500,7 @@ public:
 
         // Setup scripts
         LuaScriptDesc scriptDesc = {};
-        scriptDesc.pScriptFileName = "39_ParticleSystem/Test_AllSets.lua";
+        scriptDesc.pScriptFileName = "Test_AllSets.lua";
         scriptDesc.pWaitCondition = &gParticlesLoaded;
         luaDefineScripts(&scriptDesc, 1);
 
@@ -519,18 +553,27 @@ public:
                                           ADDRESS_MODE_CLAMP_TO_EDGE };
 
         // Sampler
-        SamplerDesc pointSamplerDesc = { FILTER_NEAREST,
-                                         FILTER_NEAREST,
-                                         MIPMAP_MODE_NEAREST,
-                                         ADDRESS_MODE_CLAMP_TO_BORDER,
-                                         ADDRESS_MODE_CLAMP_TO_BORDER,
-                                         ADDRESS_MODE_CLAMP_TO_BORDER };
+        SamplerDesc pointSamplerBorderDesc = { FILTER_NEAREST,
+                                               FILTER_NEAREST,
+                                               MIPMAP_MODE_NEAREST,
+                                               ADDRESS_MODE_CLAMP_TO_BORDER,
+                                               ADDRESS_MODE_CLAMP_TO_BORDER,
+                                               ADDRESS_MODE_CLAMP_TO_BORDER };
+
+        // Sampler
+        SamplerDesc bilinearMiplessClampDesc = { FILTER_LINEAR,
+                                                 FILTER_LINEAR,
+                                                 MIPMAP_MODE_NEAREST,
+                                                 ADDRESS_MODE_CLAMP_TO_EDGE,
+                                                 ADDRESS_MODE_CLAMP_TO_EDGE,
+                                                 ADDRESS_MODE_CLAMP_TO_EDGE };
 
         addSampler(pRenderer, &trilinearDesc, &pSamplerTrilinearAniso);
         addSampler(pRenderer, &bilinearDesc, &pSamplerBilinear);
         addSampler(pRenderer, &pointDesc, &pSamplerPointClamp);
         addSampler(pRenderer, &bilinearClampDesc, &pSamplerBilinearClamp);
-        addSampler(pRenderer, &pointSamplerDesc, &pPointClampSampler);
+        addSampler(pRenderer, &bilinearMiplessClampDesc, &pSamplerBilinearClampMipless);
+        addSampler(pRenderer, &pointSamplerBorderDesc, &pPointClampBorderSampler);
 
         /************************************************************************/
         // Load the scene
@@ -561,13 +604,44 @@ public:
             addResource(&bufferLoadDesc, nullptr);
         }
 
-        // Buffer containing data for all particles
+        // shadow filtering constants buffer
+        for (uint32_t i = 0; i < gDataBufferCount; ++i)
+        {
+            BufferLoadDesc bufferLoadDesc = {};
+            bufferLoadDesc.mDesc.mSize = sizeof(ShadowFilteringConstants);
+            bufferLoadDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            bufferLoadDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_CPU_TO_GPU;
+            bufferLoadDesc.mDesc.mFlags = BUFFER_CREATION_FLAG_PERSISTENT_MAP_BIT;
+            bufferLoadDesc.mDesc.pName = "ShadowFilteringConstants";
+            bufferLoadDesc.pData = nullptr;
+            bufferLoadDesc.ppBuffer = &pShadowFilteringConstantsUniformBuffers[i][0];
+            addResource(&bufferLoadDesc, nullptr);
+            bufferLoadDesc.ppBuffer = &pShadowFilteringConstantsUniformBuffers[i][1];
+            addResource(&bufferLoadDesc, nullptr);
+        }
         BufferLoadDesc bufferLoadDesc = {};
-        bufferLoadDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_BUFFER | DESCRIPTOR_TYPE_RW_BUFFER;
+        bufferLoadDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bufferLoadDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_CPU_TO_GPU;
+        bufferLoadDesc.mDesc.mSize = sizeof(ShadowFilteringConstants);
+        bufferLoadDesc.mDesc.pName = "ShadowConstants";
+        bufferLoadDesc.mDesc.mFlags = BUFFER_CREATION_FLAG_PERSISTENT_MAP_BIT;
+        bufferLoadDesc.pData = NULL;
+        for (uint32_t i = 0; i < gDataBufferCount; ++i)
+        {
+            for (uint32_t j = 0; j < SHADOW_CONSTANTS_BUFFERS_COUNT; ++j)
+            {
+                bufferLoadDesc.ppBuffer = &pShadowConstantsBuffers[i][j];
+                addResource(&bufferLoadDesc, NULL);
+            }
+        }
+
+        // Buffer containing data for all particles
+        bufferLoadDesc = {};
+        bufferLoadDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_BUFFER_RAW | DESCRIPTOR_TYPE_RW_BUFFER_RAW;
         bufferLoadDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
         bufferLoadDesc.mDesc.mFirstElement = 0;
-        bufferLoadDesc.mDesc.mStructStride = sizeof(ParticleData);
-        bufferLoadDesc.mDesc.mElementCount = MAX_PARTICLES_COUNT;
+        bufferLoadDesc.mDesc.mStructStride = sizeof(uint32_t);
+        bufferLoadDesc.mDesc.mElementCount = gMaxParticlesCount * PARTICLE_DATA_STRIDE;
         bufferLoadDesc.mDesc.mSize = bufferLoadDesc.mDesc.mStructStride * (uint64_t)bufferLoadDesc.mDesc.mElementCount;
         bufferLoadDesc.pData = NULL;
         bufferLoadDesc.mForceReset = false;
@@ -575,42 +649,57 @@ public:
         bufferLoadDesc.ppBuffer = &pParticlesBuffer;
         bufferLoadDesc.mDesc.mStartState = RESOURCE_STATE_SHADER_RESOURCE;
         addResource(&bufferLoadDesc, NULL);
-
         // Buffer containing the bitfields of the particles
-        bufferLoadDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_BUFFER | DESCRIPTOR_TYPE_RW_BUFFER;
-        bufferLoadDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
-        bufferLoadDesc.mDesc.mStructStride = sizeof(uint32_t);
-        bufferLoadDesc.mDesc.mSize = sizeof(uint32_t) * (uint64_t)bufferLoadDesc.mDesc.mElementCount;
-        bufferLoadDesc.mDesc.pName = "ParticlesBitfields";
-        bufferLoadDesc.ppBuffer = &pParticleBitfields;
-        bufferLoadDesc.mDesc.mStartState = RESOURCE_STATE_SHADER_RESOURCE;
-        addResource(&bufferLoadDesc, NULL);
+        BufferLoadDesc bitfieldDesc = bufferLoadDesc;
+        bitfieldDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_BUFFER | DESCRIPTOR_TYPE_RW_BUFFER;
+        bitfieldDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+        bitfieldDesc.mDesc.mStructStride = sizeof(uint32_t);
+        bitfieldDesc.mDesc.mElementCount = gMaxParticlesCount;
+        bitfieldDesc.mDesc.mSize = sizeof(uint32_t) * (uint64_t)bitfieldDesc.mDesc.mElementCount;
+        bitfieldDesc.mDesc.pName = "ParticlesBitfields";
+        bitfieldDesc.ppBuffer = &pParticleBitfields;
+        bitfieldDesc.mDesc.mStartState = RESOURCE_STATE_SHADER_RESOURCE;
+        bitfieldDesc.pData = NULL;
+        // Buffer containing the particle sets
+        BufferLoadDesc particleSetsDesc = bufferLoadDesc;
 
+        pDefaultParticleSets = (ParticleSet*)tf_malloc(sizeof(ParticleSet) * MAX_PARTICLE_SET_COUNT);
+        pDefaultBitfields = (uint32_t*)tf_malloc(sizeof(uint32_t) * gMaxParticlesCount);
+        memset((void*)pDefaultParticleSets, 0, sizeof(ParticleSet) * MAX_PARTICLE_SET_COUNT);
+        memset(pDefaultBitfields, 0, sizeof(uint32_t) * gMaxParticlesCount);
 #if !defined(ENABLE_REMOTE_STREAMING)
-        pParticleSets = (ParticleSet*)tf_malloc(sizeof(ParticleSet) * MAX_PARTICLE_SET_COUNT);
-        initDefaultParticleSets(pParticleSets);
-        bufferLoadDesc.pData = pParticleSets;
+        initDefaultParticleSets(pDefaultParticleSets, pDefaultBitfields);
 #endif
-        bufferLoadDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_BUFFER;
-        bufferLoadDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
-        bufferLoadDesc.mDesc.mStructStride = sizeof(ParticleSet);
-        bufferLoadDesc.mDesc.mElementCount = MAX_PARTICLE_SET_COUNT;
-        bufferLoadDesc.mDesc.mSize = bufferLoadDesc.mDesc.mStructStride * (uint64_t)bufferLoadDesc.mDesc.mElementCount;
-        bufferLoadDesc.mDesc.pName = "ParticleSetsBuffer";
-        bufferLoadDesc.ppBuffer = &pParticleSetsBuffer;
-        bufferLoadDesc.mDesc.mStartState = RESOURCE_STATE_SHADER_RESOURCE;
-        addResource(&bufferLoadDesc, NULL);
+        particleSetsDesc.pData = pDefaultParticleSets;
+        bitfieldDesc.pData = pDefaultBitfields;
+        addResource(&bitfieldDesc, NULL);
+
+        particleSetsDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_BUFFER;
+        particleSetsDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+        particleSetsDesc.mDesc.mStructStride = sizeof(ParticleSet);
+        particleSetsDesc.mDesc.mElementCount = MAX_PARTICLE_SET_COUNT;
+        particleSetsDesc.mDesc.mSize = particleSetsDesc.mDesc.mStructStride * (uint64_t)particleSetsDesc.mDesc.mElementCount;
+        particleSetsDesc.mDesc.pName = "ParticleSetsBuffer";
+        particleSetsDesc.ppBuffer = &pParticleSetsBuffer;
+        particleSetsDesc.mDesc.mStartState = RESOURCE_STATE_SHADER_RESOURCE;
+        addResource(&particleSetsDesc, NULL);
         /************************************************************************/
         // Load textures
         /************************************************************************/
         // Particle textures
         TextureLoadDesc particleTexLoad = {};
         particleTexLoad.mCreationFlag = TEXTURE_CREATION_FLAG_SRGB;
-        particleTexLoad.pFileName = "Particles/FireflyTmp.tex";
+        particleTexLoad.pFileName = "Particles/FireflyParticle.tex";
         particleTexLoad.ppTexture = &ppParticleTextures[0];
         addResource(&particleTexLoad, NULL);
-        particleTexLoad.pFileName = "Particles/smoke_01.tex";
+        particleTexLoad.pFileName = "Particles/WaterSplash.tex";
         particleTexLoad.ppTexture = &ppParticleTextures[1];
+        addResource(&particleTexLoad, NULL);
+        particleTexLoad.pFileName = "Particles/SwarmParticle.tex";
+        particleTexLoad.ppTexture = &ppParticleTextures[2];
+        addResource(&particleTexLoad, NULL);
+        particleTexLoad.pFileName = "Particles/RainParticle.tex";
+        particleTexLoad.ppTexture = &ppParticleTextures[3];
         addResource(&particleTexLoad, NULL);
         waitForAllResourceLoads();
 
@@ -618,7 +707,7 @@ public:
         BufferLoadDesc bufferBoundsLoad = {};
         bufferBoundsLoad.mDesc.mDescriptors = DESCRIPTOR_TYPE_BUFFER | DESCRIPTOR_TYPE_RW_BUFFER;
         bufferBoundsLoad.mDesc.mElementCount =
-            LIGHT_CLUSTER_WIDTH * VERTICAL_SUBCLUSTER_COUNT * LIGHT_CLUSTER_HEIGHT * HORIZONTAL_SUBCLUSTER_COUNT * DEPTH_BOUNDS_ENTRY_SIZE;
+            gLightClusterWidth * VERTICAL_SUBCLUSTER_COUNT * gLightClusterHeight * HORIZONTAL_SUBCLUSTER_COUNT * DEPTH_BOUNDS_ENTRY_SIZE;
         bufferBoundsLoad.mDesc.mStructStride = sizeof(uint);
         bufferBoundsLoad.mDesc.mFirstElement = 0;
         bufferBoundsLoad.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
@@ -646,132 +735,145 @@ public:
 
         // App Actions
         AddCustomInputBindings();
-        initScreenshotInterface(pRenderer, pGraphicsQueue);
+        initScreenshotCapturer(pRenderer, pGraphicsQueue, GetName());
         return true;
     }
 
 #if !defined(ENABLE_REMOTE_STREAMING)
-    void initDefaultParticleSets(ParticleSet* particleSets)
+    void initDefaultParticleSets(ParticleSet* pParticleSets, uint32_t* pBitfields)
     {
-        const float gSteeringStrength = 3.1f;
-        const float gBoidsSeek = 2.0f;
-        const float gBoidsAvoid = 1.0;
-        const float gBoidsFlee = 0.0f;
-        const float gBoidsSeparation = 0.05f;
-        const float gBoidsCohesion = 4.5f;
-        const float gBoidsAlignment = 0.25f;
+        const uint32_t maxSwarmParticles = 2000000;
+        const uint32_t maxRainParticles = 2000000;
+        const uint32_t maxShadowParticles = 8;
+        const uint32_t maxLightParticles = 15000;
+
+        const float gSteeringStrength = 1.02f;
+        const float gBoidsSeek = 0.2f;
+        const float gBoidsSeparation = 1.5f;
+        const float gBoidsCohesion = 0.44f;
+        const float gBoidsAlignment = 0.17f;
 
         ParticleSet swarmBase = {};
-        swarmBase.Position = float4(8, 6, 11, 0);
+        swarmBase.PositionAndInitialAge = float4(8, 6, 11, 10);
         swarmBase.ParticleSetBitfield =
             PARTICLE_BITFIELD_TYPE_BOIDS | PARTICLE_BITFIELD_LIGHTING_MODE_NONE | PARTICLE_BITFIELD_MODULATION_TYPE_SPEED;
-#if defined(AUTOMATED_TESTING)
-        swarmBase.ParticlesPerSecond = 400000;
-        swarmBase.InitialAge = 2.5;
-#else
-        swarmBase.ParticlesPerSecond = 100000;
-        swarmBase.InitialAge = 10.0;
-#endif
-        swarmBase.BoidsAvoidSeekStrength = pack2Floats(gBoidsAvoid, gBoidsSeek);
+        swarmBase.ParticlesPerSecond = maxSwarmParticles / swarmBase.PositionAndInitialAge.w;
+        swarmBase.BoidsSeparationSeekStrength = pack2Floats(gBoidsSeparation, gBoidsSeek);
         swarmBase.BoidsCohesionAlignmentStrength = pack2Floats(gBoidsCohesion, gBoidsAlignment);
-        swarmBase.BoidsSeparationFleeStrength = pack2Floats(gBoidsSeparation, gBoidsFlee);
-        swarmBase.SteeringStrengthMinSpeed = pack2Floats(gSteeringStrength, 1.5f);
-        swarmBase.SpawnVolume = uint2(pack2Floats(1.0f, 1.0f), pack2Floats(1.0f, 0.001f));
-        swarmBase.MaxSizeAndSpeed = pack2Floats(0.014f, 1.5f);
+        swarmBase.SteeringStrengthMinSpeed = pack2Floats(gSteeringStrength, 1.0f);
+        swarmBase.SpawnVolume = uint2(pack2Floats(0.2f, 0.2f), pack2Floats(0.2f, 0.001f));
+        swarmBase.VisibilityVolume = uint2(pack2Floats(2.0f, 2.0f), pack2Floats(2.0f, 0.0f));
+        swarmBase.MaxSizeAndSpeed = pack2Floats(0.005f, 5.0f);
         swarmBase.LightRadiusAndVelocityNoise = 0;
         swarmBase.StartSizeAndTime = pack2Floats(0.0f, 0.3f);
         swarmBase.EndSizeAndTime = pack2Floats(0.0f, 0.7f);
-        swarmBase.TextureIndices = 0;
-        swarmBase.Allocated = 1;
-        swarmBase.AttractorIndex = (uint32_t)-1;
+        swarmBase.TextureIndices = 2 << 16;
+        swarmBase.AllocatedAndAttractorIndex = 1 << 16;
         swarmBase.MinAndMaxAlpha = pack2Floats(1.0f, 1.0f);
+        swarmBase.VelocityStretch = 1.5f;
+        swarmBase.StartVelocity = uint2(pack2Floats(0.0f, 0.0f), pack2Floats(0.0f, 1.0f));
 
         ParticleSet lightSet = {};
+        lightSet.AllocatedAndAttractorIndex = 1 << 16;
         lightSet.ParticleSetBitfield = PARTICLE_BITFIELD_LIGHTING_MODE_LIGHT | PARTICLE_BITFIELD_MODULATION_TYPE_LIFETIME;
         lightSet.StartColor = packUnorm4x8(float4(1.0f, 1.0f, 0.2f, 0.1f));
         lightSet.EndColor = packUnorm4x8(float4(1.0f, 0.2f, 0.0f, 0.9f));
         lightSet.SteeringStrengthMinSpeed = pack2Floats(gSteeringStrength, 0.05f);
-        lightSet.InitialAge = 10.0;
         lightSet.LightRadiusAndVelocityNoise = pack2Floats(0.5f, 0.01f);
         lightSet.LightPulseSpeedAndOffset = pack2Floats(1.0f, 0.5f);
-        lightSet.SpawnVolume = uint2(pack2Floats(10, 6), pack2Floats(8.0f, 0.002f));
-        lightSet.Position = float4(2.0f, 8.0f, 5.0f, 0.0f);
-        lightSet.MaxSizeAndSpeed = pack2Floats(0.15f, 0.25f);
-        lightSet.ParticlesPerSecond = 1500;
+        lightSet.SpawnVolume = uint2(pack2Floats(10, 6), pack2Floats(8.0f, 0.01f));
+        lightSet.VisibilityVolume = lightSet.SpawnVolume;
+        lightSet.PositionAndInitialAge = float4(2.0f, 8.0f, 5.0f, 10.0f);
+        lightSet.MaxSizeAndSpeed = pack2Floats(0.1f, 0.25f);
+        lightSet.ParticlesPerSecond = maxLightParticles / lightSet.PositionAndInitialAge.w;
         lightSet.StartSizeAndTime = pack2Floats(0.0f, 0.1f);
         lightSet.EndSizeAndTime = pack2Floats(0.0f, 0.9f);
         lightSet.TextureIndices = 0;
         lightSet.MinAndMaxAlpha = pack2Floats(1.0f, 1.0f);
 
         for (uint32_t i = 0; i < DEFAULT_PARTICLE_SETS_COUNT; i++)
-            particleSets[i] = swarmBase;
+            pParticleSets[i] = swarmBase;
 
         uint32_t particleSetIdx = 0;
-        // Red particles
-        particleSets[particleSetIdx].Position = float4(6.0f, 6.0f, 10.0f, 0.0f);
-        particleSets[particleSetIdx].StartColor = packUnorm4x8(float4(1.0f, 0.1f, 0.0f, 0.2f));
-        particleSets[particleSetIdx].EndColor = packUnorm4x8(float4(1.0f, 0.1f, 0.0f, 0.8f));
-        particleSets[particleSetIdx].AttractorIndex = 0;
-        particleSets[particleSetIdx++].SpawnVolume = uint2(pack2Floats(4.0f, 4.0f), pack2Floats(4.0f, 0.001f));
-
-        // Green particles
-        particleSets[particleSetIdx].Position = float4(-6.0f, 6.0f, 10.0f, 0.0f);
-        particleSets[particleSetIdx].StartColor = packUnorm4x8(float4(0.5f, 1.0f, 0.0f, 0.1f));
-        particleSets[particleSetIdx].EndColor = packUnorm4x8(float4(0.5f, 1.0f, 0.0f, 0.9f));
-        particleSets[particleSetIdx++].SteeringStrengthMinSpeed = pack2Floats(0.5f, 1.0f);
-
-        // White particles
-        particleSets[particleSetIdx].Position = float4(6.0f, 6.0f, -2.0f, 0.0f);
-        particleSets[particleSetIdx].SteeringStrengthMinSpeed = pack2Floats(0.5f, 1.0f);
-        particleSets[particleSetIdx].StartColor = packUnorm4x8(float4(1.0f, 1.0f, 1.0f, 0.1f));
-        particleSets[particleSetIdx++].EndColor = packUnorm4x8(float4(1.0f, 1.0f, 1.0f, 0.9f));
-
-        // Yellow particles
-        particleSets[particleSetIdx].Position = float4(-6.0f, 6.0f, -2.0f, 0.0f);
-        particleSets[particleSetIdx].StartColor = packUnorm4x8(float4(1.0f, 1.0f, 0.5f, 0.1f));
-        particleSets[particleSetIdx].EndColor = packUnorm4x8(float4(1.0f, 1.0f, 0.5f, 0.9f));
-        particleSets[particleSetIdx++].SteeringStrengthMinSpeed = pack2Floats(0.5f, 1.0f);
-
-        // Fireflies
-        particleSets[particleSetIdx++] = lightSet;
-
-        // Smoke 1
-        particleSets[particleSetIdx].Position = float4(4.0f, 3.0f, 4.0f, 0.0f);
-        particleSets[particleSetIdx].StartColor = packUnorm4x8(float4(1.0f, 0.5f, 0.8f, 0.3f));
-        particleSets[particleSetIdx].EndColor = packUnorm4x8(float4(0.6f, 0.1f, 0.1f, 0.8f));
-        particleSets[particleSetIdx].ParticleSetBitfield = PARTICLE_BITFIELD_MODULATION_TYPE_LIFETIME;
-        particleSets[particleSetIdx].ParticlesPerSecond = 2;
-        particleSets[particleSetIdx].InitialAge = 20.0f;
-        particleSets[particleSetIdx].SteeringStrengthMinSpeed = pack2Floats(0.0f, 0.05f);
-        particleSets[particleSetIdx].SpawnVolume = uint2(pack2Floats(4, 1), pack2Floats(4.0f, 1.5f));
-        particleSets[particleSetIdx].MaxSizeAndSpeed = pack2Floats(2.0f, 0.1f);
-        particleSets[particleSetIdx].StartSizeAndTime = pack2Floats(0.75f, 0.2f);
-        particleSets[particleSetIdx].TextureIndices = 1 << 16;
-        particleSets[particleSetIdx++].EndSizeAndTime = pack2Floats(0.75f, 0.8f);
-
-        // Smoke 2
-        particleSets[particleSetIdx] = particleSets[particleSetIdx - 1];
-        particleSets[particleSetIdx].Position = float4(8.0f, 3.0f, 4.0f, 0.0f);
-        particleSets[particleSetIdx].StartColor = packUnorm4x8(float4(0.0f, 0.0f, 1.0f, 0.3f));
-        particleSets[particleSetIdx++].EndColor = packUnorm4x8(float4(0.0f, 1.0f, 0.5f, 0.8f));
 
         // Shadow casting
-        particleSets[particleSetIdx] = lightSet;
-        particleSets[particleSetIdx].Position = float4(5.0f, 7.0f, 5.0f, 0.0f);
-        particleSets[particleSetIdx].ParticleSetBitfield = PARTICLE_BITFIELD_LIGHTING_MODE_LIGHTNSHADOW;
-        particleSets[particleSetIdx].StartColor = packUnorm4x8(float4(0.8f, 1.0f, 0.1f, 0.2f));
-        particleSets[particleSetIdx].EndColor = packUnorm4x8(float4(0.8f, 1.0f, 0.1f, 0.8f));
-        particleSets[particleSetIdx].LightRadiusAndVelocityNoise = pack2Floats(3.0f, 0.0f);
-        particleSets[particleSetIdx].ParticlesPerSecond = float(8) / 10.0f;
-        particleSets[particleSetIdx].InitialAge = 10.0f;
-        particleSets[particleSetIdx].SpawnVolume = uint2(pack2Floats(10.0f, 6.0f), pack2Floats(8.0f, 0.1f));
-        particleSets[particleSetIdx].SteeringStrengthMinSpeed = pack2Floats(gSteeringStrength, 1.0f);
-        particleSets[particleSetIdx].LightPulseSpeedAndOffset = pack2Floats(0.0f, 1.0f);
+        pParticleSets[particleSetIdx] = lightSet;
+        pParticleSets[particleSetIdx].StartIdx = 0;
+        pParticleSets[particleSetIdx].PositionAndInitialAge = float4(5.0f, 7.0f, 5.0f, 10.0f);
+        pParticleSets[particleSetIdx].ParticleSetBitfield = PARTICLE_BITFIELD_LIGHTING_MODE_LIGHTNSHADOW;
+        pParticleSets[particleSetIdx].StartColor = packUnorm4x8(float4(0.8f, 1.0f, 0.1f, 0.2f));
+        pParticleSets[particleSetIdx].EndColor = packUnorm4x8(float4(0.8f, 1.0f, 0.1f, 0.8f));
+        pParticleSets[particleSetIdx].LightRadiusAndVelocityNoise = pack2Floats(3.0f, 0.0f);
+        pParticleSets[particleSetIdx].ParticlesPerSecond = maxShadowParticles / pParticleSets[particleSetIdx].PositionAndInitialAge.w;
+        pParticleSets[particleSetIdx].SpawnVolume = uint2(pack2Floats(10.0f, 6.0f), pack2Floats(8.0f, 0.1f));
+        pParticleSets[particleSetIdx].SteeringStrengthMinSpeed = pack2Floats(gSteeringStrength, 1.0f);
+        pParticleSets[particleSetIdx++].LightPulseSpeedAndOffset = pack2Floats(0.0f, 1.0f);
+
+        // Fireflies
+        pParticleSets[particleSetIdx] = lightSet;
+        pParticleSets[particleSetIdx++].StartIdx = MAX_SHADOW_COUNT;
+
+        // Red particles
+        pParticleSets[particleSetIdx].PositionAndInitialAge = float4(6.0f, 6.0f, 10.0f, 10.0f);
+        pParticleSets[particleSetIdx].StartColor = packUnorm4x8(float4(0.6f, 0.0f, 0.0f, 0.2f));
+        pParticleSets[particleSetIdx].EndColor = packUnorm4x8(float4(1.0f, 1.0f, 0.0f, 0.8f));
+        pParticleSets[particleSetIdx].AllocatedAndAttractorIndex |= 1;
+        pParticleSets[particleSetIdx].StartIdx = MAX_LIGHT_COUNT + MAX_SHADOW_COUNT;
+        pParticleSets[particleSetIdx].VisibilityVolume = uint2(pack2Floats(10.0f, 10.0f), pack2Floats(10.0f, 0.001f));
+        pParticleSets[particleSetIdx++].SpawnVolume = uint2(pack2Floats(4.0f, 4.0f), pack2Floats(4.0f, 0.001f));
+
+        // Green particles
+        pParticleSets[particleSetIdx].PositionAndInitialAge = float4(-6.0f, 6.0f, 10.0f, 10.0f);
+        pParticleSets[particleSetIdx].StartColor = packUnorm4x8(float4(0.5f, 0.5f, 1.0f, 0.1f));
+        pParticleSets[particleSetIdx].EndColor = packUnorm4x8(float4(0.5f, 1.0f, 0.0f, 0.9f));
+        pParticleSets[particleSetIdx].ParticleSetBitfield &= ~(PARTICLE_BITFIELD_TYPE_BOIDS | PARTICLE_BITFIELD_MODULATION_TYPE_SPEED);
+        pParticleSets[particleSetIdx].ParticleSetBitfield |= PARTICLE_BITFIELD_MODULATION_TYPE_LIFETIME;
+        pParticleSets[particleSetIdx].StartIdx = pParticleSets[particleSetIdx - 1].StartIdx + maxSwarmParticles;
+        pParticleSets[particleSetIdx].ParticlesPerSecond = 0.0f;
+        pParticleSets[particleSetIdx].MaxSizeAndSpeed = pack2Floats(0.005f, 3.0f);
+        pParticleSets[particleSetIdx++].SteeringStrengthMinSpeed = pack2Floats(0.5f, 1.0f);
+
+        // Rain
+        pParticleSets[particleSetIdx] = {};
+        pParticleSets[particleSetIdx].AllocatedAndAttractorIndex = 1 << 16;
+        pParticleSets[particleSetIdx].ParticleSetBitfield = PARTICLE_BITFIELD_COLLIDE_WITH_DEPTH_BUFFER | PARTICLE_BITFIELD_TYPE_RAIN;
+        pParticleSets[particleSetIdx].StartColor = packUnorm4x8(float4(0.8f, 0.8f, 1.0f, 0.1f));
+        pParticleSets[particleSetIdx].EndColor = packUnorm4x8(float4(0.5f, 0.5f, 0.6f, 0.95f));
+        pParticleSets[particleSetIdx].PositionAndInitialAge = float4(0.9f, 17.3f, 6.8f, 5.0f);
+        pParticleSets[particleSetIdx].ParticlesPerSecond = maxRainParticles / pParticleSets[particleSetIdx].PositionAndInitialAge.w;
+        pParticleSets[particleSetIdx].SpawnVolume = uint2(pack2Floats(7.55f, 0.5f), pack2Floats(6.85f, 0.0005f));
+        pParticleSets[particleSetIdx].VisibilityVolume = uint2(pack2Floats(7.55f, 8.0f), pack2Floats(6.85f, 0.0005f));
+        pParticleSets[particleSetIdx].StartSizeAndTime = pack2Floats(0.0f, 0.1f);
+        pParticleSets[particleSetIdx].EndSizeAndTime = pack2Floats(0.0f, 0.9f);
+        pParticleSets[particleSetIdx].MaxSizeAndSpeed = pack2Floats(0.002f, 4.26f);
+        pParticleSets[particleSetIdx].SteeringStrengthMinSpeed = pack2Floats(0.0f, 1.25f);
+        pParticleSets[particleSetIdx].MinAndMaxAlpha = pack2Floats(0.65f, 0.85f);
+        pParticleSets[particleSetIdx].VelocityStretch = 1.0f;
+        pParticleSets[particleSetIdx].TextureIndices = (3 << 16) | 1;
+        pParticleSets[particleSetIdx].AnimationTiling = (8 << 16) | 4;
+        pParticleSets[particleSetIdx].StartIdx = pParticleSets[particleSetIdx - 1].StartIdx + maxRainParticles;
+        pParticleSets[particleSetIdx].StartVelocity = uint2(pack2Floats(0.0f, 0.0f), pack2Floats(0.0f, 0.0f));
+        pParticleSets[particleSetIdx++].Acceleration = uint2(pack2Floats(0.0f, -9.8f), pack2Floats(0.0f, 5.0f));
+
+        memset((void*)pBitfields, 0, sizeof(uint32_t) * gMaxParticlesCount);
 
         for (uint32_t i = 0; i < DEFAULT_PARTICLE_SETS_COUNT; i++)
-            particleSets[i].Allocated = 1;
+        {
+            pParticleSets[i].AllocatedAndAttractorIndex |= 1 << 16;
+
+            for (uint32_t j = pParticleSets[i].StartIdx;
+                 j <
+                 pParticleSets[i].StartIdx + (uint32_t)ceil(pParticleSets[i].PositionAndInitialAge.w * pParticleSets[i].ParticlesPerSecond);
+                 j++)
+            {
+                pBitfields[j] = PARTICLE_BITFIELD_REQUIRES_INIT | i;
+            }
+        }
+
         for (uint32_t i = DEFAULT_PARTICLE_SETS_COUNT; i < MAX_PARTICLE_SET_COUNT; i++)
-            particleSets[i].Allocated = 0;
+        {
+            pParticleSets[i].AllocatedAndAttractorIndex = 0;
+        }
     }
 #endif
     Scene* LoadGeometry()
@@ -830,7 +932,7 @@ public:
         exitStreamServer();
 #endif
 
-        exitScreenshotInterface();
+        exitScreenshotCapturer();
         exitCameraController(pCameraController);
 
         tf_free(gCameraPathData);
@@ -840,6 +942,16 @@ public:
         for (uint32_t i = 0; i < gDataBufferCount; ++i)
         {
             removeResource(pParticleConstantBuffer[i]);
+            removeResource(pShadowFilteringConstantsUniformBuffers[i][0]);
+            removeResource(pShadowFilteringConstantsUniformBuffers[i][1]);
+        }
+
+        for (uint32_t i = 0; i < gDataBufferCount; ++i)
+        {
+            for (uint32_t j = 0; j < SHADOW_CONSTANTS_BUFFERS_COUNT; ++j)
+            {
+                removeResource(pShadowConstantsBuffers[i][j]);
+            }
         }
 
         removeResource(pParticlesBuffer);
@@ -870,7 +982,7 @@ public:
         }
 
         // Destroy scene buffers
-#if defined(FORGE_DEBUG)
+#if defined(FORGE_DEBUG) && !defined(AUTOMATED_TESTING)
         bdestroy(&gParticleStatsText);
 #endif
         removeResource(pGeom);
@@ -879,9 +991,8 @@ public:
         tf_free(gDiffuseMapsStorage);
         tf_free(gNormalMapsStorage);
         tf_free(gSpecularMapsStorage);
-#if !defined(ENABLE_REMOTE_STREAMING)
-        tf_free(pParticleSets);
-#endif
+        tf_free(pDefaultParticleSets);
+        tf_free(pDefaultBitfields);
 
         /************************************************************************/
         /************************************************************************/
@@ -893,14 +1004,15 @@ public:
         exitQueue(pRenderer, pGraphicsQueue);
         exitQueue(pRenderer, pComputeQueue);
 
+        removeSampler(pRenderer, pSamplerBilinearClampMipless);
         removeSampler(pRenderer, pSamplerTrilinearAniso);
         removeSampler(pRenderer, pSamplerBilinear);
         removeSampler(pRenderer, pSamplerPointClamp);
         removeSampler(pRenderer, pSamplerBilinearClamp);
-        removeSampler(pRenderer, pPointClampSampler);
+        removeSampler(pRenderer, pPointClampBorderSampler);
 
         exitVisibilityBuffer(pVisibilityBuffer);
-
+        exitRootSignature(pRenderer);
         exitResourceLoaderInterface(pRenderer);
         exitRenderer(pRenderer);
         exitGPUConfiguration();
@@ -920,6 +1032,12 @@ public:
 
         gFrameCount = 0;
 
+        if (pReloadDesc->mType & RELOAD_TYPE_SHADER)
+        {
+            addShaders();
+            addDescriptorSets();
+        }
+
         if (pReloadDesc->mType & (RELOAD_TYPE_RESIZE | RELOAD_TYPE_RENDERTARGET))
         {
             loadProfilerUI(gAppResolution.x, gAppResolution.y);
@@ -927,11 +1045,11 @@ public:
             // Setup the UI components
             UIComponentDesc guiDesc = {};
             guiDesc.mStartPosition = vec2((float)(gAppResolution.x - 500.0f), 0.0f);
-            guiDesc.mStartSize = vec2(500, 150);
+            guiDesc.mStartSize = vec2(600, 200);
             uiAddComponent(GetName(), &guiDesc, &pGuiWindow);
             uiSetComponentFlags(pGuiWindow, GUI_COMPONENT_FLAGS_NO_COLLAPSE | GUI_COMPONENT_FLAGS_NO_RESIZE);
 
-#if defined(FORGE_DEBUG)
+#if defined(FORGE_DEBUG) && !defined(AUTOMATED_TESTING)
             DynamicTextWidget textWidget;
             textWidget.pText = &gParticleStatsText;
             textWidget.pColor = &gTextColor;
@@ -957,41 +1075,15 @@ public:
                 return false;
             addRenderTargets();
 
-            // Shadow collector
-            TextureLoadDesc shadowCollectorLoad = {};
-            TextureDesc     shadowCollectorDesc = {};
-
-            shadowCollectorDesc.mArraySize = 1;
-            shadowCollectorDesc.mMipLevels = 1;
-            shadowCollectorDesc.mDepth = 1;
-            shadowCollectorDesc.mDescriptors = DESCRIPTOR_TYPE_TEXTURE | DESCRIPTOR_TYPE_RW_TEXTURE;
-            // R: shadow data, G: distance from occluder, B: distance from camera, A: shadow mask
-            shadowCollectorDesc.mFormat = TinyImageFormat_R16_SFLOAT; // TinyImageFormat_R16G16B16A16_SFLOAT;
-            shadowCollectorDesc.mHeight = gAppResolution.y;
-            shadowCollectorDesc.mWidth = gAppResolution.x;
-            shadowCollectorDesc.mSampleCount = SAMPLE_COUNT_1;
-            shadowCollectorDesc.mSampleQuality = 0;
-            shadowCollectorDesc.mStartState = RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            shadowCollectorDesc.pName = "ShadowCollector";
-
-            shadowCollectorLoad.ppTexture = &pShadowCollector;
-            shadowCollectorLoad.pDesc = &shadowCollectorDesc;
-            addResource(&shadowCollectorLoad, NULL);
-
-            shadowCollectorLoad.pDesc->pName = "FilteredShadowCollector";
-            shadowCollectorLoad.ppTexture = &pFilteredShadowCollector;
-            shadowCollectorLoad.pDesc->mStartState = RESOURCE_STATE_UNORDERED_ACCESS;
-            addResource(&shadowCollectorLoad, NULL);
-
             // Setup lights cluster data
             BufferLoadDesc lightClustersCountBufferDesc = {};
             lightClustersCountBufferDesc.mDesc.mSize =
-                LIGHT_CLUSTER_WIDTH * LIGHT_CLUSTER_HEIGHT * HORIZONTAL_SUBCLUSTER_COUNT * VERTICAL_SUBCLUSTER_COUNT * sizeof(uint32_t);
+                gLightClusterWidth * gLightClusterHeight * HORIZONTAL_SUBCLUSTER_COUNT * VERTICAL_SUBCLUSTER_COUNT * sizeof(uint32_t);
             lightClustersCountBufferDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_BUFFER | DESCRIPTOR_TYPE_RW_BUFFER;
             lightClustersCountBufferDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
             lightClustersCountBufferDesc.mDesc.mFirstElement = 0;
             lightClustersCountBufferDesc.mDesc.mElementCount =
-                LIGHT_CLUSTER_WIDTH * LIGHT_CLUSTER_HEIGHT * HORIZONTAL_SUBCLUSTER_COUNT * VERTICAL_SUBCLUSTER_COUNT;
+                gLightClusterWidth * gLightClusterHeight * HORIZONTAL_SUBCLUSTER_COUNT * VERTICAL_SUBCLUSTER_COUNT;
             lightClustersCountBufferDesc.mDesc.mStructStride = sizeof(uint32_t);
             lightClustersCountBufferDesc.pData = NULL;
             lightClustersCountBufferDesc.mDesc.mStartState = RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -1001,8 +1093,8 @@ public:
             addResource(&lightClustersCountBufferDesc, NULL);
 
             BufferLoadDesc lightClustersDataBufferDesc = {};
-            lightClustersDataBufferDesc.mDesc.mElementCount = MAX_LIGHTS_PER_CLUSTER * LIGHT_CLUSTER_WIDTH * LIGHT_CLUSTER_HEIGHT *
-                                                              HORIZONTAL_SUBCLUSTER_COUNT * VERTICAL_SUBCLUSTER_COUNT;
+            lightClustersDataBufferDesc.mDesc.mElementCount =
+                MAX_LIGHTS_PER_CLUSTER * gLightClusterWidth * gLightClusterHeight * HORIZONTAL_SUBCLUSTER_COUNT * VERTICAL_SUBCLUSTER_COUNT;
             lightClustersDataBufferDesc.mDesc.mStructStride = sizeof(uint32_t);
             lightClustersDataBufferDesc.mDesc.mSize =
                 lightClustersDataBufferDesc.mDesc.mElementCount * lightClustersDataBufferDesc.mDesc.mStructStride;
@@ -1037,34 +1129,6 @@ public:
             transparencyListHeadDesc.mDesc.pName = "Transparency List Heads";
             transparencyListHeadDesc.ppBuffer = &pTransparencyListHeadBuffer;
             addResource(&transparencyListHeadDesc, NULL);
-
-            ParticleSystemInitDesc particleDesc = {};
-            particleDesc.pRenderer = pRenderer;
-            particleDesc.mSwapColorFormat = pScreenRenderTarget->mFormat;
-            particleDesc.mSwapHeight = pScreenRenderTarget->mHeight;
-            particleDesc.mSwapWidth = pScreenRenderTarget->mWidth;
-            particleDesc.mFramesInFlight = gDataBufferCount;
-            particleDesc.mDefaultParticleSetsCount = DEFAULT_PARTICLE_SETS_COUNT;
-            particleDesc.mDepthFormat = pDepthBuffer->mFormat;
-            particleDesc.mColorSampleQuality = pScreenRenderTarget->mSampleQuality;
-            particleDesc.pColorBuffer = pScreenRenderTarget->pTexture;
-            particleDesc.pDepthBuffer = pDepthBuffer->pTexture;
-            particleDesc.pTransparencyListBuffer = pTransparencyListBuffer;
-            particleDesc.pTransparencyListHeadsBuffer = pTransparencyListHeadBuffer;
-            particleDesc.ppParticleConstantBuffer = pParticleConstantBuffer;
-            particleDesc.pParticlesBuffer = pParticlesBuffer;
-            particleDesc.pParticleSetsBuffer = pParticleSetsBuffer;
-            particleDesc.pBitfieldBuffer = pParticleBitfields;
-            particleDesc.ppParticleTextures = ppParticleTextures;
-            particleDesc.mParticleTextureCount = PARTICLE_TEXTURES_COUNT;
-            particleSystemInit(&particleDesc);
-        }
-
-        if (pReloadDesc->mType & RELOAD_TYPE_SHADER)
-        {
-            addShaders();
-            addRootSignatures();
-            addDescriptorSets();
         }
 
         if (pReloadDesc->mType & (RELOAD_TYPE_SHADER | RELOAD_TYPE_RENDERTARGET))
@@ -1073,6 +1137,48 @@ public:
         }
 
         prepareDescriptorSets();
+
+        ParticleSystemInitDesc particleDesc = {};
+        particleDesc.pRenderer = pRenderer;
+        particleDesc.mSwapColorFormat = pScreenRenderTarget->mFormat;
+        particleDesc.mSwapHeight = pScreenRenderTarget->mHeight;
+        particleDesc.mSwapWidth = pScreenRenderTarget->mWidth;
+        particleDesc.mFramesInFlight = gDataBufferCount;
+        particleDesc.mDefaultParticleSetsCount = DEFAULT_PARTICLE_SETS_COUNT;
+        particleDesc.mDepthFormat = pDepthBuffer->mFormat;
+        particleDesc.mColorSampleQuality = pScreenRenderTarget->mSampleQuality;
+        particleDesc.pColorBuffer = pScreenRenderTarget->pTexture;
+        particleDesc.pDepthBuffer = pDepthBuffer->pTexture;
+        particleDesc.pTransparencyListBuffer = pTransparencyListBuffer;
+        particleDesc.pTransparencyListHeadsBuffer = pTransparencyListHeadBuffer;
+        particleDesc.ppParticleConstantBuffer = pParticleConstantBuffer;
+        particleDesc.pParticlesBuffer = pParticlesBuffer;
+        particleDesc.pParticleSetsBuffer = pParticleSetsBuffer;
+        particleDesc.pBitfieldBuffer = pParticleBitfields;
+        particleDesc.ppParticleTextures = ppParticleTextures;
+        particleDesc.mParticleTextureCount = 4;
+        particleDesc.pDescriptorSetPersistent = pDescriptorSetPersistent;
+        particleDesc.pDescriptorSetPerFrame = pDescriptorSetPerFrame;
+        particleDesc.pDescriptorSetPerBatch = pDescriptorSetParticlePerBatch;
+
+        // pass the indices from here so particles code can update the descriptor set
+        particleDesc.mParticleTexturesIndex = SRT_RES_IDX(SrtData, Persistent, ParticleTextures);
+        particleDesc.mDepthBufferIndex = SRT_RES_IDX(SrtData, Persistent, gDepthBuffer);
+        particleDesc.mParticlesDataBufferIndex = SRT_RES_IDX(ParticleSrtData, PerBatch, gParticlesDataBufferRW);
+        particleDesc.mParticlesBufferStateIndex = SRT_RES_IDX(ParticleSrtData, PerBatch, gParticleBufferStateRW);
+        particleDesc.mTransparencyListIndex = SRT_RES_IDX(ParticleSrtData, PerBatch, gTransparencyListRW);
+        particleDesc.mBitfieldBufferIndex = SRT_RES_IDX(ParticleSrtData, PerBatch, gBitfieldBufferRW);
+        particleDesc.mParticleSetBufferIndex = SRT_RES_IDX(SrtData, Persistent, gParticleSetsBuffer);
+        particleDesc.mParticleSetVisibilityIndex = SRT_RES_IDX(ParticleSrtData, PerBatch, gParticleSetVisibilityRW);
+        particleDesc.mParticlesToRasterizeIndex = SRT_RES_IDX(ParticleSrtData, PerBatch, gParticlesToRasterizeRW);
+        particleDesc.mTransparencyListHeadsIndex = SRT_RES_IDX(ParticleSrtData, PerBatch, gTransparencyListHeadsRW);
+        particleDesc.mParticleRenderIndirectDataIndex = SRT_RES_IDX(ParticleSrtData, PerBatch, gParticleRenderIndirectDataRW);
+        particleDesc.mStatsBufferIndex = SRT_RES_IDX(ParticleSrtData, PerBatch, gParticleStatsBufferRW);
+
+        particleDesc.pParticleRenderPipeline = pParticleRenderPipeline;
+        particleDesc.pParticleSimulatePipeline = pParticleSimulatePipeline;
+
+        initParticleSystem(&particleDesc);
 
         UserInterfaceLoadDesc uiLoad = {};
         uiLoad.mColorFormat = pSwapChain->ppRenderTargets[0]->mFormat;
@@ -1104,11 +1210,17 @@ public:
         gParticlesLoaded = false;
 
         gCurrTime = 0.0f;
-        gFirefliesWhirlAngle = 0.5;
-        gFirefliesElevationT = 0.5;
+        gFirefliesWhirlAngles[0] = 0.0f;
+        gFirefliesWhirlAngles[1] = PI / 4;
+        gFirefliesWhirlAngles[2] = PI / 2;
+        gFirefliesWhirlAngles[3] = (3 * PI) / 2;
+        gFirefliesElevationTs[0] = 0.0f;
+        gFirefliesElevationTs[1] = 0.25f;
+        gFirefliesElevationTs[2] = 0.5f;
+        gFirefliesElevationTs[3] = 0.75f;
 
         LuaScriptDesc runDesc = {};
-        runDesc.pScriptFileName = "39_ParticleSystem/Test_AllSets.lua";
+        runDesc.pScriptFileName = "Test_AllSets.lua";
         runDesc.pWaitCondition = &gParticlesLoaded;
         luaQueueScriptToRun(&runDesc);
 
@@ -1151,13 +1263,12 @@ public:
             uiRemoveComponent(pGuiWindow);
             unloadProfilerUI();
 
-            particleSystemExit();
+            exitParticleSystem();
         }
 
         if (pReloadDesc->mType & RELOAD_TYPE_SHADER)
         {
             removeDescriptorSets();
-            removeRootSignatures();
             removeShaders();
         }
     }
@@ -1168,14 +1279,7 @@ public:
 #if defined(AUTOMATED_TESTING)
         deltaTime = 0.016f;
 #endif
-        // On Apple platforms, Screenshots.cpp currently has to wait one frame after the capture is requested in order to take a
-        // screenshot. Since the app is closed after 240 frames have passed and all scripts have been launched, if a script finishes
-        // after 240 frames, then no screenshot is taken. For this reason we only wait 210 frames on Apple platforms.
-#if defined(__APPLE__)
-        if (gCurrTime >= 3.5f)
-#else
         if (gCurrTime >= 10.0f)
-#endif
         {
             gParticlesLoaded = true;
         }
@@ -1221,28 +1325,10 @@ public:
 #ifdef REMOTE_SERVER
         if (streamServerIsConnected())
         {
-            // streamServerGetLastReceiveInputData(pCameraController);
-            //
-            // RemoteStreamBufferType bufferType;
-            // uint32_t               bufferSize;
-            // uint32_t               bufferOffset;
-            // void*                  bufferData = streamServerGetLastReceiveBufferData(&bufferType, &bufferSize, &bufferOffset);
-            // if (bufferData && bufferType == REMOTE_STREAM_BUFFER_TYPE_PARTICLE_SETS)
-            //{
-            //    // update the GPU buffer using resource manager
-            //    BufferUpdateDesc bufferUpdateDesc = {};
-            //    bufferUpdateDesc.mDstOffset = bufferOffset;
-            //    bufferUpdateDesc.mSize = bufferSize;
-            //    bufferUpdateDesc.pBuffer = pParticleSetsBuffer;
-            //
-            //    beginUpdateResource(&bufferUpdateDesc);
-            //    if (bufferUpdateDesc.pMappedData)
-            //        memcpy(bufferUpdateDesc.pMappedData, bufferData, bufferSize);
-            //    endUpdateResource(&bufferUpdateDesc);
-            //}
             if (!userInput)
                 streamServerReceiveInputData(pCameraController);
-            streamServerReceiveParticleSetsData(pParticleSetsBuffer);
+            streamServerReceiveBuffer(REMOTE_STREAM_BUFFER_TYPE_PARTICLE_SETS, pParticleSetsBuffer);
+            streamServerReceiveBuffer(REMOTE_STREAM_BUFFER_TYPE_PARTICLE_BITFIELDS, pParticleBitfields);
         }
 #endif
 
@@ -1281,6 +1367,27 @@ public:
             waitQueueIdle(pGraphicsQueue);
             ::toggleVSync(pRenderer, &pSwapChain);
         }
+
+#if defined(FORGE_DEBUG) && !defined(AUTOMATED_TESTING)
+        static Fence* pPrevFence = NULL;
+
+        if ((gFrameCount % STATS_COLLECTION_FREQUENCY) == 0 && pPrevFence != NULL)
+        {
+            FenceStatus fenceStatus;
+            getFenceStatus(pRenderer, pPrevFence, &fenceStatus);
+            if (fenceStatus == FENCE_STATUS_INCOMPLETE)
+                waitForFences(pRenderer, 1, &pPrevFence);
+
+            ParticleSystemStats particleSystemStats = getParticleSystemStats();
+            bassignliteral(&gParticleStatsText, "");
+            bformat(&gParticleStatsText,
+                    "Allocated particles\nShadow + light: %d, Light: %d, Standard: %d\nAlive particles\nShadow + light: %d, Light: %d, "
+                    "Standard: %d\nVisible lights: %d\nVisible particles: %d\n",
+                    particleSystemStats.AllocatedCount[0], particleSystemStats.AllocatedCount[1], particleSystemStats.AllocatedCount[2],
+                    particleSystemStats.AliveCount[0], particleSystemStats.AliveCount[1], particleSystemStats.AliveCount[2],
+                    particleSystemStats.VisibleLightsCount, particleSystemStats.VisibleParticlesCount);
+        }
+#endif
 
         /*****************************************/
         // ASYNC COMPUTE PASS
@@ -1345,8 +1452,8 @@ public:
             }
             resetCmdPool(pRenderer, graphicsElem.pCmdPool);
 
-#if defined(FORGE_DEBUG)
-            ParticleSystemStats particleSystemStats = particleSystemGetStats();
+#if defined(FORGE_DEBUG) && !defined(AUTOMATED_TESTING)
+            ParticleSystemStats particleSystemStats = getParticleSystemStats();
             bassignliteral(&gParticleStatsText, "");
             bformat(&gParticleStatsText,
                     "Allocated particles\nShadow + light: %d, Light: %d, Standard: %d\nAlive particles\nShadow + light: %d, Light: %d, "
@@ -1374,7 +1481,7 @@ public:
                 endUpdateResource(&update);
             }
 
-            particleSystemUpdateConstantBuffers(frameIdx, &pParticleSystemConstantData[frameIdx]);
+            updateParticleSystemConstantBuffers(frameIdx, &pParticleSystemConstantData[frameIdx]);
 
             Cmd* graphicsCmd = graphicsElem.pCmds[0];
             beginCmd(graphicsCmd);
@@ -1397,7 +1504,9 @@ public:
 
             // Clear shadow collector
             cmdBindPipeline(graphicsCmd, pPipelineCleanTexture);
-            cmdBindDescriptorSet(graphicsCmd, 0, pDescriptorSetCleanTexture);
+            cmdBindDescriptorSet(graphicsCmd, 0, pDescriptorSetVisibilityBufferShadePerBatch);
+            cmdBindDescriptorSet(graphicsCmd, 0, pDescriptorSetPersistent);
+            cmdBindDescriptorSet(graphicsCmd, frameIdx, pDescriptorSetPerFrame);
             cmdDispatch(graphicsCmd, (uint32_t)ceil((float)gAppResolution.x / TEXTURE_CLEAR_THREAD_COUNT),
                         (uint32_t)ceil((float)gAppResolution.y / TEXTURE_CLEAR_THREAD_COUNT), 1);
 
@@ -1467,15 +1576,9 @@ public:
                 };
                 cmdResourceBarrier(graphicsCmd, 2, particlesBarriers, 0, NULL, 0, NULL);
 
-                cmdBeginGpuTimestampQuery(graphicsCmd, gGraphicsProfileToken, "ParticleSystemBegin");
-                {
-                    particleSystemCmdBegin(graphicsCmd, frameIdx);
-                }
-                cmdEndGpuTimestampQuery(graphicsCmd, gGraphicsProfileToken);
-
                 cmdBeginGpuTimestampQuery(graphicsCmd, gGraphicsProfileToken, "ParticleSystemSimulate");
                 {
-                    particleSystemCmdSimulate(graphicsCmd, frameIdx);
+                    cmdParticleSystemSimulate(graphicsCmd, frameIdx);
 
                     RenderTargetBarrier depthBarrier = { pDepthBuffer, RESOURCE_STATE_SHADER_RESOURCE, RESOURCE_STATE_DEPTH_WRITE };
                     cmdResourceBarrier(graphicsCmd, 0, NULL, 0, NULL, 1, &depthBarrier);
@@ -1500,7 +1603,7 @@ public:
                                    1.0f);
                     cmdSetScissor(graphicsCmd, 0, 0, pScreenRenderTarget->mWidth, pScreenRenderTarget->mHeight);
 
-                    particleSystemCmdRender(graphicsCmd, frameIdx);
+                    cmdParticleSystemRender(graphicsCmd, frameIdx);
                     cmdBindRenderTargets(graphicsCmd, NULL);
                 }
                 cmdEndGpuTimestampQuery(graphicsCmd, gGraphicsProfileToken);
@@ -1568,20 +1671,27 @@ public:
                     cmdResourceBarrier(graphicsCmd, 0, NULL, 1, &texBarrier, 0, NULL);
 
                     cmdBindPipeline(graphicsCmd, pPipelineFilterShadows);
-                    cmdBindDescriptorSet(graphicsCmd, 0, pDescriptorSetFilterShadows);
-                    cmdBindPushConstants(graphicsCmd, pRootSignatureFilterShadows, gShadowFilteringPushConstsIndex, &constants);
+                    cmdBindDescriptorSet(graphicsCmd, 0, pDescriptorSetPersistent);
+                    cmdBindDescriptorSet(graphicsCmd, frameIdx, pDescriptorSetPerFrame);
+                    BufferUpdateDesc updateVertical = { pShadowFilteringConstantsUniformBuffers[frameIdx][0] };
+                    beginUpdateResource(&updateVertical);
+                    memcpy(updateVertical.pMappedData, &constants, sizeof(constants));
+                    endUpdateResource(&updateVertical);
+                    cmdBindDescriptorSet(graphicsCmd, frameIdx * 2, pDescriptorSetShadowFilteringPerDraw);
                     // Horizontal pass
                     cmdDispatch(graphicsCmd, (uint32_t)ceil((float)gAppResolution.x / SHADOWMAP_BLUR_THREAD_COUNT),
                                 (uint32_t)ceil((float)gAppResolution.y / SHADOWMAP_BLUR_THREAD_COUNT), 1);
-
                     texBarrier = { pFilteredShadowCollector, RESOURCE_STATE_UNORDERED_ACCESS, RESOURCE_STATE_UNORDERED_ACCESS };
                     cmdResourceBarrier(graphicsCmd, 0, NULL, 1, &texBarrier, 0, NULL);
-
                     // Vertical pass, write on the shadow collector
                     constants.Horizontal = 0;
-
-                    cmdBindPushConstants(graphicsCmd, pRootSignatureFilterShadows, gShadowFilteringPushConstsIndex, &constants);
-                    cmdBindDescriptorSet(graphicsCmd, 0, pDescriptorSetFilterShadows);
+                    BufferUpdateDesc updateHorizontal = { pShadowFilteringConstantsUniformBuffers[frameIdx][1] };
+                    beginUpdateResource(&updateHorizontal);
+                    memcpy(updateHorizontal.pMappedData, &constants, sizeof(constants));
+                    endUpdateResource(&updateHorizontal);
+                    cmdBindDescriptorSet(graphicsCmd, 0, pDescriptorSetPersistent);
+                    cmdBindDescriptorSet(graphicsCmd, frameIdx, pDescriptorSetPerFrame);
+                    cmdBindDescriptorSet(graphicsCmd, frameIdx * 2 + 1, pDescriptorSetShadowFilteringPerDraw);
                     cmdDispatch(graphicsCmd, (uint32_t)ceil((float)gAppResolution.x / SHADOWMAP_BLUR_THREAD_COUNT),
                                 (uint32_t)ceil((float)gAppResolution.y / SHADOWMAP_BLUR_THREAD_COUNT), 1);
                     cmdResourceBarrier(graphicsCmd, 0, NULL, 1, &texBarrier, 0, NULL);
@@ -1626,7 +1736,7 @@ public:
                                                   RESOURCE_STATE_PIXEL_SHADER_RESOURCE } };
 
                 cmdResourceBarrier(graphicsCmd, 0, NULL, 1, texBarrier, 3, rtBarriers);
-                cmdBeginGpuTimestampQuery(graphicsCmd, gGraphicsProfileToken, "Full Screen Quad");
+                cmdBeginGpuTimestampQuery(graphicsCmd, gGraphicsProfileToken, "OIT Compose");
                 // Draw full screen quad
                 {
                     BindRenderTargetsDesc bindDesc = {};
@@ -1639,16 +1749,9 @@ public:
                     cmdBindRenderTargets(graphicsCmd, &bindDesc);
                     cmdSetViewport(graphicsCmd, 0.0f, 0.0f, (float)finalTarget->mWidth, (float)finalTarget->mHeight, 0.0f, 1.0f);
                     cmdSetScissor(graphicsCmd, 0, 0, finalTarget->mWidth, finalTarget->mHeight);
-
-                    struct PushConstants
-                    {
-                        uint2 size;
-                    } pushConsts;
-                    pushConsts.size = uint2(finalTarget->mWidth, finalTarget->mHeight);
-
                     cmdBindPipeline(graphicsCmd, pPipelinePresent);
-                    cmdBindDescriptorSet(graphicsCmd, 0, pDescriptorSetPresent);
-                    cmdBindPushConstants(graphicsCmd, pRootSignaturePresent, gPresentPushConstantsIndex, &pushConsts);
+                    cmdBindDescriptorSet(graphicsCmd, 0, pDescriptorSetPersistent);
+                    cmdBindDescriptorSet(graphicsCmd, frameIdx, pDescriptorSetPerFrame);
                     cmdDraw(graphicsCmd, 3, 0);
                     cmdBindRenderTargets(graphicsCmd, NULL);
                 }
@@ -1705,10 +1808,12 @@ public:
                 // streamServerEncodeAndPackFrame(pSwapChain, presentIndex);
                 streamFrame(pSwapChain, presentIndex);
 #endif
-
                 queuePresent(pGraphicsQueue, &presentDesc);
                 flipProfiler();
 
+#if defined(FORGE_DEBUG) && !defined(AUTOMATED_TESTING)
+                pPrevFence = graphicsElem.pFence;
+#endif
                 gJustLoaded = false;
             }
         }
@@ -1720,294 +1825,216 @@ public:
 
     bool addDescriptorSets()
     {
-        // Clear Buffers
-        DescriptorSetDesc setDesc = { pRootSignatureClearBuffers, DESCRIPTOR_UPDATE_FREQ_NONE, gDataBufferCount };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetClearBuffers);
-        // Triangle Filtering
-        setDesc = { pRootSignatureTriangleFiltering, DESCRIPTOR_UPDATE_FREQ_NONE, 1 };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetTriangleFiltering[0]);
-        setDesc = { pRootSignatureTriangleFiltering, DESCRIPTOR_UPDATE_FREQ_PER_FRAME, gDataBufferCount };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetTriangleFiltering[1]);
-        // Light Clustering
-        setDesc = { pRootSignatureLightClusters, DESCRIPTOR_UPDATE_FREQ_NONE, gDataBufferCount };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetLightClusters[0]);
-        setDesc = { pRootSignatureLightClusters, DESCRIPTOR_UPDATE_FREQ_PER_FRAME, gDataBufferCount };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetLightClusters[1]);
-        // VB, Shadow
-        setDesc = { pRootSignatureVBPass, DESCRIPTOR_UPDATE_FREQ_NONE, 1 };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetVBPass[0]);
-        setDesc = { pRootSignatureVBPass, DESCRIPTOR_UPDATE_FREQ_PER_FRAME, gDataBufferCount };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetVBPass[1]);
+        // Persistent set
+        DescriptorSetDesc setDesc = SRT_SET_DESC(SrtData, Persistent, 1, 0);
+        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetPersistent);
 
-        setDesc = { pRootSignatureFilterShadows, DESCRIPTOR_UPDATE_FREQ_NONE, 1 };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetFilterShadows);
-        setDesc = { pRootSignatureCleanTexture, DESCRIPTOR_UPDATE_FREQ_NONE, 1 };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetCleanTexture);
+        // cluster lights set
+        setDesc = SRT_SET_DESC(ClusterLightsSrtData, PerBatch, 1, 0);
+        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetClusterLightsPerBatch);
 
-        // VB Shade
-        setDesc = { pRootSignatureVBShade, DESCRIPTOR_UPDATE_FREQ_NONE, 1 };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetVBShade[0]);
-        setDesc = { pRootSignatureVBShade, DESCRIPTOR_UPDATE_FREQ_PER_FRAME, gDataBufferCount };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetVBShade[1]);
+        // Per frame set
+        setDesc = SRT_SET_DESC(SrtData, PerFrame, gDataBufferCount, 0);
+        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetPerFrame);
 
-        // Downsample depth
-        setDesc = { pRootSignatureDownsampleDepth, DESCRIPTOR_UPDATE_FREQ_NONE, 1 };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetDownsampleDepth);
-        // Present
-        setDesc = { pRootSignaturePresent, DESCRIPTOR_UPDATE_FREQ_NONE, 1 };
-        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetPresent);
+        // triangle filtering set set
+        setDesc = SRT_SET_DESC(TriangleFilteringSrtData, PerBatch, gDataBufferCount, 0);
+        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetTriangleFilteringPerBatch);
+
+        // Particle per batch set
+        setDesc = SRT_SET_DESC(ParticleSrtData, PerBatch, 1, 0);
+        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetParticlePerBatch);
+
+        // visibility buffer shade
+        setDesc = SRT_SET_DESC(SrtVisibilityBufferShadeData, PerBatch, 1, 0);
+        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetVisibilityBufferShadePerBatch);
+
+        setDesc = SRT_SET_DESC(SrtShadowFilteringCompData, PerDraw, 2 * gDataBufferCount, 0);
+        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetShadowFilteringPerDraw);
+
+        setDesc = SRT_SET_DESC(SrtShadowPassData, PerDraw, MAX_SHADOW_COUNT * 7 * gDataBufferCount, 0);
+        addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetShadowConstantsPerDraw);
 
         return true;
     }
 
     void removeDescriptorSets()
     {
-        removeDescriptorSet(pRenderer, pDescriptorSetVBPass[0]);
-        removeDescriptorSet(pRenderer, pDescriptorSetVBPass[1]);
-        removeDescriptorSet(pRenderer, pDescriptorSetVBShade[0]);
-        removeDescriptorSet(pRenderer, pDescriptorSetVBShade[1]);
-        removeDescriptorSet(pRenderer, pDescriptorSetLightClusters[0]);
-        removeDescriptorSet(pRenderer, pDescriptorSetLightClusters[1]);
-        removeDescriptorSet(pRenderer, pDescriptorSetClearBuffers);
-        removeDescriptorSet(pRenderer, pDescriptorSetTriangleFiltering[0]);
-        removeDescriptorSet(pRenderer, pDescriptorSetTriangleFiltering[1]);
-        removeDescriptorSet(pRenderer, pDescriptorSetFilterShadows);
-        removeDescriptorSet(pRenderer, pDescriptorSetCleanTexture);
-        removeDescriptorSet(pRenderer, pDescriptorSetDownsampleDepth);
-        removeDescriptorSet(pRenderer, pDescriptorSetPresent);
+        removeDescriptorSet(pRenderer, pDescriptorSetVisibilityBufferShadePerBatch);
+        removeDescriptorSet(pRenderer, pDescriptorSetParticlePerBatch);
+        removeDescriptorSet(pRenderer, pDescriptorSetClusterLightsPerBatch);
+        removeDescriptorSet(pRenderer, pDescriptorSetTriangleFilteringPerBatch);
+        removeDescriptorSet(pRenderer, pDescriptorSetShadowConstantsPerDraw);
+        removeDescriptorSet(pRenderer, pDescriptorSetShadowFilteringPerDraw);
+        removeDescriptorSet(pRenderer, pDescriptorSetPerFrame);
+        removeDescriptorSet(pRenderer, pDescriptorSetPersistent);
     }
 
     void prepareDescriptorSets()
     {
         // Particle ranges
         DescriptorDataRange bitfieldLightRange = { 0, sizeof(uint) * MAX_LIGHT_COUNT, sizeof(uint) };
-        DescriptorDataRange particleLightRange = { 0, sizeof(ParticleData) * MAX_LIGHT_COUNT, sizeof(ParticleData) };
+        DescriptorDataRange particleLightRange = { 0, sizeof(uint) * PARTICLE_DATA_STRIDE * MAX_LIGHT_COUNT, sizeof(uint) };
 
-        DescriptorDataRange bitfieldShadowRange = { 0, sizeof(uint) * MAX_SHADOW_COUNT, sizeof(uint) };
-        DescriptorDataRange particleShadowRange = { 0, sizeof(ParticleData) * MAX_SHADOW_COUNT, sizeof(ParticleData) };
+        // DescriptorDataRange bitfieldShadowRange = { 0, sizeof(uint) * MAX_SHADOW_COUNT, sizeof(uint) };
+        DescriptorDataRange particleShadowRange = { 0, sizeof(uint) * PARTICLE_DATA_STRIDE * MAX_SHADOW_COUNT, sizeof(uint) };
 
-        // Clear Buffers
+        // Persistent descriptor set
         {
-            for (uint32_t i = 0; i < gDataBufferCount; ++i)
+            DescriptorData persistentParams[30] = {};
+            persistentParams[0].mIndex = SRT_RES_IDX(SrtData, Persistent, gDownsampledDepthBuffer);
+            persistentParams[0].ppTextures = &pRenderTargetDownsampleDepth->pTexture;
+            persistentParams[1].mIndex = SRT_RES_IDX(SrtData, Persistent, gBitfieldBuffer);
+            persistentParams[1].ppBuffers = &pParticleBitfields;
+            persistentParams[1].pRanges = &bitfieldLightRange;
+            persistentParams[2].mIndex = SRT_RES_IDX(SrtData, Persistent, gDepthBuffer);
+            persistentParams[2].ppTextures = &pDepthBuffer->pTexture;
+            persistentParams[3].mIndex = SRT_RES_IDX(SrtData, Persistent, gParticleSetsBuffer);
+            persistentParams[3].ppBuffers = &pParticleSetsBuffer;
+            persistentParams[4].mIndex = SRT_RES_IDX(SrtData, Persistent, gVertexPositionBuffer);
+            persistentParams[4].ppBuffers = &pGeom->pVertexBuffers[0];
+            persistentParams[5].mIndex = SRT_RES_IDX(SrtData, Persistent, gIndexDataBuffer);
+            persistentParams[5].ppBuffers = &pGeom->pIndexBuffer;
+            persistentParams[6].mIndex = SRT_RES_IDX(SrtData, Persistent, gMeshConstantsBuffer);
+            persistentParams[6].ppBuffers = &pMeshConstantsBuffer;
+            persistentParams[7].mIndex = SRT_RES_IDX(SrtData, Persistent, gParticlesDataBuffer);
+            persistentParams[7].ppBuffers = &pParticlesBuffer;
+            persistentParams[7].pRanges = &particleShadowRange;
+            persistentParams[8].mIndex = SRT_RES_IDX(SrtData, Persistent, gVertexTexCoordBuffer);
+            persistentParams[8].ppBuffers = &pGeom->pVertexBuffers[1];
+            persistentParams[9].mIndex = SRT_RES_IDX(SrtData, Persistent, gVBTex);
+            persistentParams[9].ppTextures = &pRenderTargetVBPass->pTexture;
+            persistentParams[10].mIndex = SRT_RES_IDX(SrtData, Persistent, gVertexPositionBuffer);
+            persistentParams[10].ppBuffers = &pGeom->pVertexBuffers[0];
+            persistentParams[11].mIndex = SRT_RES_IDX(SrtData, Persistent, gVertexTexCoordBuffer);
+            persistentParams[11].ppBuffers = &pGeom->pVertexBuffers[1];
+            persistentParams[12].mIndex = SRT_RES_IDX(SrtData, Persistent, gVertexNormalBuffer);
+            persistentParams[12].ppBuffers = &pGeom->pVertexBuffers[2];
+            persistentParams[13].mIndex = SRT_RES_IDX(SrtData, Persistent, gShadowMap);
+            persistentParams[13].ppTextures = &pRenderTargetShadow->pTexture;
+            persistentParams[14].mIndex = SRT_RES_IDX(SrtData, Persistent, gMeshConstantsBuffer);
+            persistentParams[14].ppBuffers = &pMeshConstantsBuffer;
+            persistentParams[15].mIndex = SRT_RES_IDX(SrtData, Persistent, gDiffuseMaps);
+            persistentParams[15].mCount = gMaterialCount;
+            persistentParams[15].ppTextures = gDiffuseMapsStorage;
+            persistentParams[16].mIndex = SRT_RES_IDX(SrtData, Persistent, gNormalMaps);
+            persistentParams[16].mCount = gMaterialCount;
+            persistentParams[16].ppTextures = gNormalMapsStorage;
+            persistentParams[17].mIndex = SRT_RES_IDX(SrtData, Persistent, gSpecularMaps);
+            persistentParams[17].mCount = gMaterialCount;
+            persistentParams[17].ppTextures = gSpecularMapsStorage;
+            persistentParams[18].mIndex = SRT_RES_IDX(SrtData, Persistent, gLightClustersCount);
+            persistentParams[18].ppBuffers = &pLightClustersCount;
+            persistentParams[19].mIndex = SRT_RES_IDX(SrtData, Persistent, gLightClusters);
+            persistentParams[19].ppBuffers = &pLightClusters;
+            persistentParams[20].mIndex = SRT_RES_IDX(SrtData, Persistent, gDepthBuffer);
+            persistentParams[20].ppTextures = &pDepthBuffer->pTexture;
+            persistentParams[21].mIndex = SRT_RES_IDX(SrtData, Persistent, gInputTexture);
+            persistentParams[21].ppTextures = &pScreenRenderTarget->pTexture;
+            persistentParams[22].mIndex = SRT_RES_IDX(SrtData, Persistent, gShadowCollector);
+            persistentParams[22].ppTextures = &pShadowCollector;
+            persistentParams[23].mIndex = SRT_RES_IDX(SrtData, Persistent, gTransparencyListHeads);
+            persistentParams[23].ppBuffers = &pTransparencyListHeadBuffer;
+            persistentParams[24].mIndex = SRT_RES_IDX(SrtData, Persistent, gParticlesDataBuffer);
+            persistentParams[24].ppBuffers = &pParticlesBuffer;
+            persistentParams[24].pRanges = &particleLightRange;
+            persistentParams[25].mIndex = SRT_RES_IDX(SrtData, Persistent, gTransparencyList);
+            persistentParams[25].ppBuffers = &pTransparencyListBuffer;
+            persistentParams[26].mIndex = SRT_RES_IDX(SrtData, Persistent, gVBTextureFilter);
+            persistentParams[26].ppSamplers = &pSamplerPointClamp;
+            persistentParams[27].mIndex = SRT_RES_IDX(SrtData, Persistent, gTextureSampler);
+            persistentParams[27].ppSamplers = &pSamplerBilinear;
+            persistentParams[28].mIndex = SRT_RES_IDX(SrtData, Persistent, gDepthSampler);
+            persistentParams[28].ppSamplers = &pSamplerBilinearClamp;
+            persistentParams[29].mIndex = SRT_RES_IDX(SrtData, Persistent, gBilinearClampMiplessSampler);
+            persistentParams[29].ppSamplers = &pSamplerBilinearClampMipless;
+            updateDescriptorSet(pRenderer, 0, pDescriptorSetPersistent, 30, persistentParams);
+        }
+
+        // cluster lights bet batch set
+        DescriptorData clusterLightsParams[3] = {};
+        clusterLightsParams[0].mIndex = SRT_RES_IDX(ClusterLightsSrtData, PerBatch, gLightClustersCountRW);
+        clusterLightsParams[0].ppBuffers = &pLightClustersCount;
+        clusterLightsParams[1].mIndex = SRT_RES_IDX(ClusterLightsSrtData, PerBatch, gLightClustersRW);
+        clusterLightsParams[1].ppBuffers = &pLightClusters;
+        clusterLightsParams[2].mIndex = SRT_RES_IDX(ClusterLightsSrtData, PerBatch, gDepthBoundsBufferRW);
+        clusterLightsParams[2].ppBuffers = &pDepthBoundsBuffer;
+
+        updateDescriptorSet(pRenderer, 0, pDescriptorSetClusterLightsPerBatch, 3, clusterLightsParams);
+
+        // visibility buffer shade
+        DescriptorData visibilityBufferShadeParams[2] = {};
+        visibilityBufferShadeParams[0].mIndex = SRT_RES_IDX(SrtVisibilityBufferShadeData, PerBatch, gShadowCollectorDest);
+        visibilityBufferShadeParams[0].ppTextures = &pShadowCollector;
+        visibilityBufferShadeParams[1].mIndex = SRT_RES_IDX(SrtVisibilityBufferShadeData, PerBatch, gTransparencyListHeadsRW);
+        visibilityBufferShadeParams[1].ppBuffers = &pTransparencyListHeadBuffer;
+        updateDescriptorSet(pRenderer, 0, pDescriptorSetVisibilityBufferShadePerBatch, 2, visibilityBufferShadeParams);
+
+        // per frame set
+        DescriptorData perFrameParams[8] = {};
+        for (uint32_t i = 0; i < gDataBufferCount; ++i)
+        {
+            perFrameParams[0].mIndex = SRT_RES_IDX(SrtData, PerFrame, gFilteredIndexBuffer);
+            perFrameParams[0].ppBuffers = &pVisibilityBuffer->ppFilteredIndexBuffer[VIEW_CAMERA];
+            perFrameParams[1].mIndex = SRT_RES_IDX(SrtData, PerFrame, gDepthCube);
+            perFrameParams[1].ppTextures = &pDepthCube->pTexture;
+            perFrameParams[2].mIndex = SRT_RES_IDX(SrtData, PerFrame, gPerFrameConstants);
+            perFrameParams[2].ppBuffers = &pPerFrameUniformBuffers[i];
+            perFrameParams[3].mIndex = SRT_RES_IDX(SrtData, PerFrame, gPerFrameVBConstants);
+            perFrameParams[3].ppBuffers = &pPerFrameVBUniformBuffers[VB_UB_GRAPHICS][i];
+            perFrameParams[4].mIndex = SRT_RES_IDX(SrtData, PerFrame, gIndirectDataBuffer);
+            perFrameParams[4].ppBuffers = &pVisibilityBuffer->ppIndirectDataBuffer[i];
+            perFrameParams[5].mIndex = SRT_RES_IDX(SrtData, PerFrame, gParticleConstantBuffer);
+            perFrameParams[5].ppBuffers = &pParticleConstantBuffer[i];
+            perFrameParams[6].mIndex = SRT_RES_IDX(SrtData, PerFrame, gVBConstantBuffer);
+            perFrameParams[6].ppBuffers = &pVisibilityBuffer->pVBConstantBuffer;
+            perFrameParams[7].mIndex = SRT_RES_IDX(SrtData, PerFrame, gFilterDispatchGroupDataBuffer);
+            perFrameParams[7].ppBuffers = &pVisibilityBuffer->ppFilterDispatchGroupDataBuffer[i];
+            updateDescriptorSet(pRenderer, i, pDescriptorSetPerFrame, 8, perFrameParams);
+        }
+
+        // triangle filtering set
+        DescriptorData triangleFilteringParams[4] = {};
+        for (uint32_t i = 0; i < gDataBufferCount; ++i)
+        {
+            triangleFilteringParams[0].mIndex = SRT_RES_IDX(TriangleFilteringSrtData, PerBatch, gFilteredIndexBufferRW);
+            triangleFilteringParams[0].mCount = NUM_CULLING_VIEWPORTS;
+            triangleFilteringParams[0].ppBuffers = &pVisibilityBuffer->ppFilteredIndexBuffer[0];
+            triangleFilteringParams[1].mIndex = SRT_RES_IDX(TriangleFilteringSrtData, PerBatch, gIndirectDrawFilteringArgs);
+            triangleFilteringParams[1].ppBuffers = &pVisibilityBuffer->ppIndirectDrawArgBuffer[i];
+            triangleFilteringParams[2].mIndex = SRT_RES_IDX(TriangleFilteringSrtData, PerBatch, gIndirectDataBufferRW);
+            triangleFilteringParams[2].ppBuffers = &pVisibilityBuffer->ppIndirectDataBuffer[i];
+            triangleFilteringParams[3].mIndex = SRT_RES_IDX(TriangleFilteringSrtData, PerBatch, gIndirectDrawClearArgsRW);
+            triangleFilteringParams[3].ppBuffers = &pVisibilityBuffer->ppIndirectDrawArgBuffer[i];
+            updateDescriptorSet(pRenderer, i, pDescriptorSetTriangleFilteringPerBatch, 4, triangleFilteringParams);
+        }
+
+        Texture*       filteringTextures[] = { pShadowCollector, pFilteredShadowCollector };
+        DescriptorData perDrawParams[2] = {};
+
+        perDrawParams[0].mIndex = SRT_RES_IDX(SrtShadowFilteringCompData, PerDraw, gShadowTexturesRW);
+        perDrawParams[0].ppTextures = filteringTextures;
+        perDrawParams[0].mCount = 2;
+
+        for (uint32_t i = 0; i < gDataBufferCount; ++i)
+        {
+            perDrawParams[1].mIndex = SRT_RES_IDX(SrtShadowFilteringCompData, PerDraw, gShadowFilteringConstants);
+            perDrawParams[1].ppBuffers = &pShadowFilteringConstantsUniformBuffers[i][0];
+            updateDescriptorSet(pRenderer, i * gDataBufferCount, pDescriptorSetShadowFilteringPerDraw, 2, perDrawParams);
+            perDrawParams[1].ppBuffers = &pShadowFilteringConstantsUniformBuffers[i][1];
+            updateDescriptorSet(pRenderer, i * gDataBufferCount + 1, pDescriptorSetShadowFilteringPerDraw, 2, perDrawParams);
+        }
+
+        for (uint32_t i = 0; i < gDataBufferCount; ++i)
+        {
+            for (uint32_t j = 0; j < SHADOW_CONSTANTS_BUFFERS_COUNT; ++j)
             {
-                uint32_t       clearParamsCount = 0;
-                DescriptorData clearParams[2] = {};
-                clearParams[clearParamsCount].pName = "indirectDrawArgs";
-                clearParams[clearParamsCount++].ppBuffers = &pVisibilityBuffer->ppIndirectDrawArgBuffer[i];
-                clearParams[clearParamsCount].pName = "VBConstantBuffer";
-                clearParams[clearParamsCount++].ppBuffers = &pVisibilityBuffer->pVBConstantBuffer;
-                updateDescriptorSet(pRenderer, i, pDescriptorSetClearBuffers, clearParamsCount, clearParams);
+                perDrawParams[0].mIndex = SRT_RES_IDX(SrtShadowPassData, PerDraw, gShadowConstants);
+                perDrawParams[0].ppBuffers = &pShadowConstantsBuffers[i][j];
+                perDrawParams[0].mCount = 1;
+                updateDescriptorSet(pRenderer, i * SHADOW_CONSTANTS_BUFFERS_COUNT + j, pDescriptorSetShadowConstantsPerDraw, 1,
+                                    perDrawParams);
             }
-        }
-        // Triangle Filtering
-        {
-            DescriptorData filterParams[7] = {};
-            uint32_t       paramsCount = 0;
-            filterParams[paramsCount].pName = "vertexPositionBuffer";
-            filterParams[paramsCount++].ppBuffers = &pGeom->pVertexBuffers[0];
-            filterParams[paramsCount].pName = "indexDataBuffer";
-            filterParams[paramsCount++].ppBuffers = &pGeom->pIndexBuffer;
-            filterParams[paramsCount].pName = "meshConstantsBuffer";
-            filterParams[paramsCount++].ppBuffers = &pMeshConstantsBuffer;
-            filterParams[paramsCount].pName = "VBConstantBuffer";
-            filterParams[paramsCount++].ppBuffers = &pVisibilityBuffer->pVBConstantBuffer;
-            filterParams[paramsCount].pName = "ParticlesDataBuffer";
-            filterParams[paramsCount].ppBuffers = &pParticlesBuffer;
-            filterParams[paramsCount++].pRanges = &particleShadowRange;
-            filterParams[paramsCount].pName = "BitfieldBuffer";
-            filterParams[paramsCount].ppBuffers = &pParticleBitfields;
-            filterParams[paramsCount++].pRanges = &bitfieldShadowRange;
-            filterParams[paramsCount].pName = "ParticleSetsBuffer";
-            filterParams[paramsCount++].ppBuffers = &pParticleSetsBuffer;
-            updateDescriptorSet(pRenderer, 0, pDescriptorSetTriangleFiltering[0], paramsCount, filterParams);
-
-            for (uint32_t i = 0; i < gDataBufferCount; ++i)
-            {
-                DescriptorData filterParamsPerFrame[7] = {};
-                filterParamsPerFrame[0].pName = "filteredIndicesBuffer";
-                filterParamsPerFrame[0].mCount = NUM_CULLING_VIEWPORTS;
-                filterParamsPerFrame[0].ppBuffers = &pVisibilityBuffer->ppFilteredIndexBuffer[0];
-                filterParamsPerFrame[1].pName = "filterDispatchGroupDataBuffer";
-                filterParamsPerFrame[1].ppBuffers = &pVisibilityBuffer->ppFilterDispatchGroupDataBuffer[i];
-                filterParamsPerFrame[2].pName = "PerFrameVBConstants";
-                filterParamsPerFrame[2].ppBuffers = &pPerFrameVBUniformBuffers[VB_UB_COMPUTE][i];
-                filterParamsPerFrame[3].pName = "indirectDrawArgs";
-                filterParamsPerFrame[3].ppBuffers = &pVisibilityBuffer->ppIndirectDrawArgBuffer[i];
-                filterParamsPerFrame[4].pName = "indirectDataBuffer";
-                filterParamsPerFrame[4].ppBuffers = &pVisibilityBuffer->ppIndirectDataBuffer[i];
-                updateDescriptorSet(pRenderer, i, pDescriptorSetTriangleFiltering[1], 5, filterParamsPerFrame);
-            }
-        }
-
-        // Light Clustering
-        {
-            DescriptorData params[9] = {};
-            params[0].pName = "lightClustersCount";
-            params[0].ppBuffers = &pLightClustersCount;
-            params[1].pName = "lightClusters";
-            params[1].ppBuffers = &pLightClusters;
-            params[2].pName = "DownsampledDepthBuffer";
-            params[2].ppTextures = &pRenderTargetDownsampleDepth->pTexture;
-            params[3].pName = "BitfieldBuffer";
-            params[3].ppBuffers = &pParticleBitfields;
-            params[3].pRanges = &bitfieldLightRange;
-            params[4].pName = "ParticlesDataBuffer";
-            params[4].ppBuffers = &pParticlesBuffer;
-            params[4].pRanges = &particleLightRange;
-            params[5].pName = "DepthBuffer";
-            params[5].ppTextures = &pDepthBuffer->pTexture;
-            params[6].pName = "DepthBoundsBuffer";
-            params[6].ppBuffers = &pDepthBoundsBuffer;
-            params[7].pName = "ParticleSetsBuffer";
-            params[7].ppBuffers = &pParticleSetsBuffer;
-            updateDescriptorSet(pRenderer, 0, pDescriptorSetLightClusters[0], 8, params);
-
-            for (uint32_t i = 0; i < gDataBufferCount; ++i)
-            {
-                params[0].pName = "PerFrameVBConstants";
-                params[0].ppBuffers = &pPerFrameVBUniformBuffers[VB_UB_GRAPHICS][i];
-                params[1].pName = "ParticleConstantBuffer";
-                params[1].ppBuffers = &pParticleConstantBuffer[i];
-
-                updateDescriptorSet(pRenderer, i, pDescriptorSetLightClusters[1], 2, params);
-            }
-        }
-        // Texture cleaning
-        {
-            DescriptorData params[3] = {};
-            params[0].pName = "shadowCollector";
-            params[0].ppTextures = &pShadowCollector;
-            params[1].pName = "transparencyListHeads";
-            params[1].ppBuffers = &pTransparencyListHeadBuffer;
-            updateDescriptorSet(pRenderer, 0, pDescriptorSetCleanTexture, 2, params);
-        }
-        // VB, Shadow
-        {
-            DescriptorData params[6] = {};
-            params[0].pName = "diffuseMaps";
-            params[0].mCount = gMaterialCount;
-            params[0].ppTextures = gDiffuseMapsStorage;
-            params[1].pName = "vertexPositionBuffer";
-            params[1].ppBuffers = &pGeom->pVertexBuffers[0];
-            params[2].pName = "vertexTexCoordBuffer";
-            params[2].ppBuffers = &pGeom->pVertexBuffers[1];
-            params[3].pName = "BitfieldBuffer";
-            params[3].ppBuffers = &pParticleBitfields;
-            params[3].pRanges = &bitfieldShadowRange;
-            params[4].pName = "ParticlesDataBuffer";
-            params[4].ppBuffers = &pParticlesBuffer;
-            params[4].pRanges = &particleShadowRange;
-            params[5].pName = "ParticleSetsBuffer";
-            params[5].ppBuffers = &pParticleSetsBuffer;
-            updateDescriptorSet(pRenderer, 0, pDescriptorSetVBPass[0], 6, params);
-
-            params[0] = {};
-            for (uint32_t i = 0; i < gDataBufferCount; ++i)
-            {
-                params[0].pName = "indirectDataBuffer";
-                params[0].ppBuffers = &pVisibilityBuffer->ppIndirectDataBuffer[i];
-                params[1].pName = "PerFrameVBConstants";
-                params[1].ppBuffers = &pPerFrameVBUniformBuffers[VB_UB_GRAPHICS][i];
-
-                updateDescriptorSet(pRenderer, i, pDescriptorSetVBPass[1], 2, params);
-            }
-        }
-        // VB Shade
-        {
-            DescriptorData vbShadeParams[17] = {};
-            DescriptorData vbShadeParamsPerFrame[12] = {};
-            vbShadeParams[0].pName = "vbTex";
-            vbShadeParams[0].ppTextures = &pRenderTargetVBPass->pTexture;
-            vbShadeParams[1].pName = "vertexPos";
-            vbShadeParams[1].ppBuffers = &pGeom->pVertexBuffers[0];
-            vbShadeParams[2].pName = "vertexTexCoord";
-            vbShadeParams[2].ppBuffers = &pGeom->pVertexBuffers[1];
-            vbShadeParams[3].pName = "vertexNormal";
-            vbShadeParams[3].ppBuffers = &pGeom->pVertexBuffers[2];
-            vbShadeParams[4].pName = "shadowMap";
-            vbShadeParams[4].ppTextures = &pRenderTargetShadow->pTexture;
-            vbShadeParams[5].pName = "meshConstantsBuffer";
-            vbShadeParams[5].ppBuffers = &pMeshConstantsBuffer;
-            vbShadeParams[6].pName = "shadowCollector";
-            vbShadeParams[6].ppTextures = &pShadowCollector;
-            vbShadeParams[7].pName = "diffuseMaps";
-            vbShadeParams[7].mCount = gMaterialCount;
-            vbShadeParams[7].ppTextures = gDiffuseMapsStorage;
-            vbShadeParams[8].pName = "normalMaps";
-            vbShadeParams[8].mCount = gMaterialCount;
-            vbShadeParams[8].ppTextures = gNormalMapsStorage;
-            vbShadeParams[9].pName = "specularMaps";
-            vbShadeParams[9].mCount = gMaterialCount;
-            vbShadeParams[9].ppTextures = gSpecularMapsStorage;
-            vbShadeParams[10].pName = "VBConstantBuffer";
-            vbShadeParams[10].ppBuffers = &pVisibilityBuffer->pVBConstantBuffer;
-            vbShadeParams[11].pName = "BitfieldBuffer";
-            vbShadeParams[11].ppBuffers = &pParticleBitfields;
-            vbShadeParams[11].pRanges = &bitfieldLightRange;
-            vbShadeParams[12].pName = "ParticlesDataBuffer";
-            vbShadeParams[12].ppBuffers = &pParticlesBuffer;
-            vbShadeParams[12].pRanges = &particleLightRange;
-            vbShadeParams[13].pName = "lightClustersCount";
-            vbShadeParams[13].ppBuffers = &pLightClustersCount;
-            vbShadeParams[14].pName = "lightClusters";
-            vbShadeParams[14].ppBuffers = &pLightClusters;
-            vbShadeParams[15].pName = "ParticleSetsBuffer";
-            vbShadeParams[15].ppBuffers = &pParticleSetsBuffer;
-            updateDescriptorSet(pRenderer, 0, pDescriptorSetVBShade[0], 16, vbShadeParams);
-
-            for (uint32_t i = 0; i < gDataBufferCount; ++i)
-            {
-                vbShadeParamsPerFrame[0].pName = "filteredIndexBuffer";
-                vbShadeParamsPerFrame[0].ppBuffers = &pVisibilityBuffer->ppFilteredIndexBuffer[VIEW_CAMERA];
-                vbShadeParamsPerFrame[1].pName = "depthCube";
-                vbShadeParamsPerFrame[1].ppTextures = &pDepthCube->pTexture;
-                vbShadeParamsPerFrame[2].pName = "PerFrameConstants";
-                vbShadeParamsPerFrame[2].ppBuffers = &pPerFrameUniformBuffers[i];
-                vbShadeParamsPerFrame[3].pName = "PerFrameVBConstants";
-                vbShadeParamsPerFrame[3].ppBuffers = &pPerFrameVBUniformBuffers[VB_UB_GRAPHICS][i];
-                vbShadeParamsPerFrame[4].pName = "indirectDataBuffer";
-                vbShadeParamsPerFrame[4].ppBuffers = &pVisibilityBuffer->ppIndirectDataBuffer[i];
-                vbShadeParamsPerFrame[5].pName = "ParticleConstantBuffer";
-                vbShadeParamsPerFrame[5].ppBuffers = &pParticleConstantBuffer[i];
-                updateDescriptorSet(pRenderer, i, pDescriptorSetVBShade[1], 6, vbShadeParamsPerFrame);
-            }
-        }
-
-        {
-            Texture*       filteringTextures[] = { pShadowCollector, pFilteredShadowCollector };
-            DescriptorData params[2] = {};
-            params[0].pName = "Textures";
-            params[0].ppTextures = filteringTextures;
-            params[0].mCount = 2;
-            updateDescriptorSet(pRenderer, 0, pDescriptorSetFilterShadows, 1, params);
-        }
-
-        {
-            DescriptorData params[2] = {};
-            params[0].pName = "depthBuffer";
-            params[0].ppTextures = &pDepthBuffer->pTexture;
-            params[1].pName = "pointClampSampler";
-            params[1].ppSamplers = &pPointClampSampler;
-
-            updateDescriptorSet(pRenderer, 0, pDescriptorSetDownsampleDepth, 2, params);
-        }
-
-        {
-            DescriptorData params[6] = {};
-            params[0].pName = "bilinearSampler";
-            params[0].ppSamplers = &pSamplerBilinearClamp;
-            params[1].pName = "g_inputTexture";
-            params[1].ppTextures = &pScreenRenderTarget->pTexture;
-            params[2].pName = "shadowCollector";
-            params[2].ppTextures = &pShadowCollector;
-            params[3].pName = "transparencyListHeads";
-            params[3].ppBuffers = &pTransparencyListHeadBuffer;
-            params[4].pName = "transparencyList";
-            params[4].ppBuffers = &pTransparencyListBuffer;
-            params[5].pName = "pointClampSampler";
-            params[5].ppSamplers = &pPointClampSampler;
-
-            updateDescriptorSet(pRenderer, 0, pDescriptorSetPresent, 6, params);
         }
     }
     /************************************************************************/
@@ -2043,6 +2070,8 @@ public:
         /************************************************************************/
         // Main depth buffer
         /************************************************************************/
+        uint32_t currentOffsetESRAM = 0;
+        ESRAM_BEGIN_ALLOC(pRenderer, "Depth", currentOffsetESRAM);
         // Add depth buffer
         RenderTargetDesc depthRT = {};
         depthRT.mArraySize = 1;
@@ -2056,60 +2085,16 @@ public:
         depthRT.mSampleQuality = 0;
         depthRT.mWidth = width;
         depthRT.pName = "Depth Buffer RT";
+        depthRT.mFlags = TEXTURE_CREATION_FLAG_ESRAM;
         addRenderTarget(pRenderer, &depthRT, &pDepthBuffer);
 
-        /************************************************************************/
-        // Shadow pass render target
-        /************************************************************************/
-        RenderTargetDesc shadowRTDesc = {};
-        shadowRTDesc.mArraySize = 1;
-        shadowRTDesc.mClearValue = optimizedDepthClear;
-        shadowRTDesc.mDepth = 1;
-        shadowRTDesc.mDescriptors = DESCRIPTOR_TYPE_TEXTURE;
-        shadowRTDesc.mFormat = TinyImageFormat_D16_UNORM;
-        shadowRTDesc.mStartState = RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        shadowRTDesc.mWidth = SHADOWMAP_SIZE;
-        shadowRTDesc.mSampleCount = SAMPLE_COUNT_1;
-        shadowRTDesc.mSampleQuality = 0;
-        shadowRTDesc.mHeight = SHADOWMAP_SIZE;
-        shadowRTDesc.pName = "Shadow Map RT";
-        addRenderTarget(pRenderer, &shadowRTDesc, &pRenderTargetShadow);
-
-        // Cube depth faces
-        RenderTargetDesc faceDesc = {};
-        faceDesc.mArraySize = 6 * MAX_SHADOW_COUNT;
-        faceDesc.mClearValue = optimizedDepthClear;
-        faceDesc.mDepth = 1;
-        faceDesc.mDescriptors = DESCRIPTOR_TYPE_TEXTURE | DESCRIPTOR_TYPE_TEXTURE_CUBE | DESCRIPTOR_TYPE_RENDER_TARGET_DEPTH_SLICES;
-        faceDesc.mStartState = RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        faceDesc.mWidth = CUBE_SHADOWS_FACE_SIZE;
-        faceDesc.mHeight = CUBE_SHADOWS_FACE_SIZE;
-        faceDesc.mFormat = TinyImageFormat_D16_UNORM;
-        faceDesc.pName = "DepthCubemap";
-        faceDesc.mSampleCount = SAMPLE_COUNT_1;
-        faceDesc.mSampleQuality = 0;
-        addRenderTarget(pRenderer, &faceDesc, &pDepthCube);
-
-        /************************************************************************/
-        // Visibility buffer pass render target
-        /************************************************************************/
-        RenderTargetDesc vbRTDesc = {};
-        vbRTDesc.mArraySize = 1;
-        vbRTDesc.mClearValue = optimizedColorClearWhite;
-        vbRTDesc.mDepth = 1;
-        vbRTDesc.mDescriptors = DESCRIPTOR_TYPE_TEXTURE;
-        vbRTDesc.mFormat = TinyImageFormat_R8G8B8A8_UNORM;
-        vbRTDesc.mStartState = RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        vbRTDesc.mHeight = height;
-        vbRTDesc.mSampleCount = SAMPLE_COUNT_1;
-        vbRTDesc.mSampleQuality = 0;
-        vbRTDesc.mWidth = width;
-        vbRTDesc.pName = "VB RT";
-        addRenderTarget(pRenderer, &vbRTDesc, &pRenderTargetVBPass);
+        ESRAM_CURRENT_OFFSET(pRenderer, depthOffsetESRAM);
+        ESRAM_END_ALLOC(pRenderer);
 
         /************************************************************************/
         // Intermediate render target
         /************************************************************************/
+        ESRAM_BEGIN_ALLOC(pRenderer, "Intermediate", currentOffsetESRAM);
         RenderTargetDesc postProcRTDesc = {};
         postProcRTDesc.mArraySize = 1;
         postProcRTDesc.mClearValue = { { 0.0f, 0.0f, 0.0f, 0.0f } };
@@ -2122,10 +2107,136 @@ public:
         postProcRTDesc.mWidth = width;
         postProcRTDesc.mSampleCount = SAMPLE_COUNT_1;
         postProcRTDesc.mSampleQuality = 0;
-        postProcRTDesc.mFlags = TEXTURE_CREATION_FLAG_OWN_MEMORY_BIT;
+        postProcRTDesc.mFlags = TEXTURE_CREATION_FLAG_ESRAM | TEXTURE_CREATION_FLAG_OWN_MEMORY_BIT;
         postProcRTDesc.pName = "Intermediate target";
         addRenderTarget(pRenderer, &postProcRTDesc, &pScreenRenderTarget);
 
+        ESRAM_CURRENT_OFFSET(pRenderer, intermediateOffsetESRAM);
+        ESRAM_END_ALLOC(pRenderer);
+
+        currentOffsetESRAM = max(depthOffsetESRAM, currentOffsetESRAM);
+        currentOffsetESRAM = max(intermediateOffsetESRAM, currentOffsetESRAM);
+
+        /************************************************************************/
+        // Shadow pass render target
+        /************************************************************************/
+        ESRAM_BEGIN_ALLOC(pRenderer, "Shadow Map", currentOffsetESRAM);
+
+        RenderTargetDesc shadowRTDesc = {};
+        shadowRTDesc.mArraySize = 1;
+        shadowRTDesc.mClearValue = optimizedDepthClear;
+        shadowRTDesc.mDepth = 1;
+        shadowRTDesc.mDescriptors = DESCRIPTOR_TYPE_TEXTURE;
+        shadowRTDesc.mFormat = TinyImageFormat_D16_UNORM;
+        shadowRTDesc.mStartState = RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        shadowRTDesc.mWidth = SHADOWMAP_SIZE;
+        shadowRTDesc.mSampleCount = SAMPLE_COUNT_1;
+        shadowRTDesc.mSampleQuality = 0;
+        shadowRTDesc.mHeight = SHADOWMAP_SIZE;
+        shadowRTDesc.pName = "Shadow Map RT";
+        shadowRTDesc.mFlags = TEXTURE_CREATION_FLAG_ESRAM;
+        addRenderTarget(pRenderer, &shadowRTDesc, &pRenderTargetShadow);
+
+        ESRAM_CURRENT_OFFSET(pRenderer, shadowOffsetESRAM);
+        ESRAM_END_ALLOC(pRenderer);
+
+        /************************************************************************/
+        // Shadow Collector
+        /************************************************************************/
+        TextureLoadDesc shadowCollectorLoad = {};
+        TextureDesc     shadowCollectorDesc = {};
+
+        shadowCollectorDesc.mArraySize = 1;
+        shadowCollectorDesc.mMipLevels = 1;
+        shadowCollectorDesc.mDepth = 1;
+        shadowCollectorDesc.mDescriptors = DESCRIPTOR_TYPE_TEXTURE | DESCRIPTOR_TYPE_RW_TEXTURE;
+        // R: shadow data, G: distance from occluder, B: distance from camera, A: shadow mask
+        shadowCollectorDesc.mFormat = TinyImageFormat_R16_SFLOAT; // TinyImageFormat_R16G16B16A16_SFLOAT;
+        shadowCollectorDesc.mHeight = gAppResolution.y;
+        shadowCollectorDesc.mWidth = gAppResolution.x;
+        shadowCollectorDesc.mSampleCount = SAMPLE_COUNT_1;
+        shadowCollectorDesc.mSampleQuality = 0;
+        shadowCollectorDesc.mFlags = TEXTURE_CREATION_FLAG_ESRAM;
+
+        ESRAM_BEGIN_ALLOC(pRenderer, "Filtered Shadow Collector", currentOffsetESRAM);
+
+        shadowCollectorDesc.pName = "FilteredShadowCollector";
+        shadowCollectorDesc.mStartState = RESOURCE_STATE_UNORDERED_ACCESS;
+        shadowCollectorLoad.pDesc = &shadowCollectorDesc;
+        shadowCollectorLoad.ppTexture = &pFilteredShadowCollector;
+        addResource(&shadowCollectorLoad, NULL);
+
+        ESRAM_CURRENT_OFFSET(pRenderer, filteredShadowCollectorOffsetESRAM);
+        ESRAM_END_ALLOC(pRenderer);
+
+        currentOffsetESRAM = max(shadowOffsetESRAM, currentOffsetESRAM);
+        currentOffsetESRAM = max(filteredShadowCollectorOffsetESRAM, currentOffsetESRAM);
+
+        ESRAM_BEGIN_ALLOC(pRenderer, "Shadow Collector", currentOffsetESRAM);
+
+        shadowCollectorLoad.pDesc->mStartState = RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        shadowCollectorLoad.pDesc->pName = "ShadowCollector";
+        shadowCollectorLoad.ppTexture = &pShadowCollector;
+        addResource(&shadowCollectorLoad, NULL);
+
+        ESRAM_CURRENT_OFFSET(pRenderer, shadowCollectorOffsetESRAM);
+        ESRAM_END_ALLOC(pRenderer);
+
+        currentOffsetESRAM = max(shadowCollectorOffsetESRAM, currentOffsetESRAM);
+
+        /************************************************************************/
+        // Visibility buffer pass render target
+        /************************************************************************/
+        ESRAM_BEGIN_ALLOC(pRenderer, "VB RT", currentOffsetESRAM);
+
+        RenderTargetDesc vbRTDesc = {};
+        vbRTDesc.mArraySize = 1;
+        vbRTDesc.mClearValue = optimizedColorClearWhite;
+        vbRTDesc.mDepth = 1;
+        vbRTDesc.mDescriptors = DESCRIPTOR_TYPE_TEXTURE;
+        vbRTDesc.mFormat = TinyImageFormat_R8G8B8A8_UNORM;
+        vbRTDesc.mStartState = RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        vbRTDesc.mHeight = height;
+        vbRTDesc.mSampleCount = SAMPLE_COUNT_1;
+        vbRTDesc.mSampleQuality = 0;
+        vbRTDesc.mWidth = width;
+        vbRTDesc.mFlags = TEXTURE_CREATION_FLAG_ESRAM;
+        vbRTDesc.pName = "VB RT";
+        addRenderTarget(pRenderer, &vbRTDesc, &pRenderTargetVBPass);
+
+        ESRAM_CURRENT_OFFSET(pRenderer, vbOffsetESRAM);
+        ESRAM_END_ALLOC(pRenderer);
+
+        currentOffsetESRAM = max(vbOffsetESRAM, currentOffsetESRAM);
+
+        /************************************************************************/
+        // Cube depth faces
+        /************************************************************************/
+        ESRAM_BEGIN_ALLOC(pRenderer, "Depth Cubemap", currentOffsetESRAM);
+
+        RenderTargetDesc faceDesc = {};
+        faceDesc.mArraySize = CUBE_FACE_SIZE * MAX_SHADOW_COUNT;
+        faceDesc.mClearValue = optimizedDepthClear;
+        faceDesc.mDepth = 1;
+        faceDesc.mDescriptors = DESCRIPTOR_TYPE_TEXTURE | DESCRIPTOR_TYPE_TEXTURE_CUBE | DESCRIPTOR_TYPE_RENDER_TARGET_DEPTH_SLICES;
+        faceDesc.mStartState = RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        faceDesc.mWidth = CUBE_SHADOWS_FACE_SIZE;
+        faceDesc.mHeight = CUBE_SHADOWS_FACE_SIZE;
+        faceDesc.mFormat = TinyImageFormat_D16_UNORM;
+        faceDesc.mFlags = TEXTURE_CREATION_FLAG_ESRAM;
+        faceDesc.pName = "DepthCubemap";
+        faceDesc.mSampleCount = SAMPLE_COUNT_1;
+        faceDesc.mSampleQuality = 0;
+        addRenderTarget(pRenderer, &faceDesc, &pDepthCube);
+
+        ESRAM_CURRENT_OFFSET(pRenderer, depthCubemapOffsetESRAM);
+        ESRAM_END_ALLOC(pRenderer);
+
+        currentOffsetESRAM = max(depthCubemapOffsetESRAM, currentOffsetESRAM);
+
+        /************************************************************************/
+        // Downsampled Depth render target
+        /************************************************************************/
         RenderTargetDesc downsampledDesc = {};
         downsampledDesc.mArraySize = 1;
         downsampledDesc.mClearValue = { { 0.0f, 0.0f, 0.0f, 0.0f } };
@@ -2155,82 +2266,6 @@ public:
     /************************************************************************/
     // Load all the shaders needed for the demo
     /************************************************************************/
-    void addRootSignatures()
-    {
-        // Graphics root signatures
-        const char* pTextureSamplerName = "textureFilter";
-        const char* pShadingSamplerNames[] = { "depthSampler", "textureSampler", "pointSampler" };
-        Sampler*    pShadingSamplers[] = { pSamplerBilinearClamp, pSamplerBilinear, pSamplerPointClamp };
-
-        Shader* pShaders[NUM_GEOMETRY_SETS * 2] = {};
-        for (uint32_t i = 0; i < NUM_GEOMETRY_SETS; ++i)
-        {
-            pShaders[i * 2] = pShaderVisibilityBufferPass[i];
-            pShaders[i * 2 + 1] = pShaderShadowPass[i];
-        }
-        RootSignatureDesc vbRootDesc = { pShaders, NUM_GEOMETRY_SETS * 2 };
-        vbRootDesc.mMaxBindlessTextures = gMaterialCount;
-        vbRootDesc.ppStaticSamplerNames = &pTextureSamplerName;
-        vbRootDesc.ppStaticSamplers = &pSamplerPointClamp;
-        vbRootDesc.mStaticSamplerCount = 1;
-        addRootSignature(pRenderer, &vbRootDesc, &pRootSignatureVBPass);
-
-        RootSignatureDesc shadeRootDesc = { &pShaderVisibilityBufferShade, 1 };
-        // Set max number of bindless textures in the root signature
-        shadeRootDesc.mMaxBindlessTextures = gMaterialCount;
-        shadeRootDesc.ppStaticSamplerNames = pShadingSamplerNames;
-        shadeRootDesc.ppStaticSamplers = pShadingSamplers;
-        shadeRootDesc.mStaticSamplerCount = 3;
-        addRootSignature(pRenderer, &shadeRootDesc, &pRootSignatureVBShade);
-
-        // Clear buffers root signature
-        RootSignatureDesc clearBuffersRootDesc = { &pShaderClearBuffers, 1 };
-        addRootSignature(pRenderer, &clearBuffersRootDesc, &pRootSignatureClearBuffers);
-
-        // Triangle filtering root signatures
-        RootSignatureDesc triangleFilteringRootDesc = { &pShaderTriangleFiltering, 1 };
-        addRootSignature(pRenderer, &triangleFilteringRootDesc, &pRootSignatureTriangleFiltering);
-
-        Shader*           pClusterShaders[] = { pShaderClearLightClusters, pShaderClusterLights, pShaderComputeDepthBounds,
-                                      pShaderComputeDepthCluster };
-        RootSignatureDesc clearLightRootDesc = { pClusterShaders, 4 };
-        addRootSignature(pRenderer, &clearLightRootDesc, &pRootSignatureLightClusters);
-
-        RootSignatureDesc filterShadowsRootDesc = { &pShaderFilterShadows, 1 };
-        addRootSignature(pRenderer, &filterShadowsRootDesc, &pRootSignatureFilterShadows);
-
-        RootSignatureDesc clearTexRootDesc = { &pShaderCleanTexture, 1 };
-        addRootSignature(pRenderer, &clearTexRootDesc, &pRootSignatureCleanTexture);
-
-        Shader*           pFSQShaders[] = { pShaderPresent };
-        RootSignatureDesc presentRootDesc = { pFSQShaders, 1 };
-        presentRootDesc.ppStaticSamplerNames = pShadingSamplerNames;
-        presentRootDesc.ppStaticSamplers = pShadingSamplers;
-        presentRootDesc.mStaticSamplerCount = 2;
-        addRootSignature(pRenderer, &presentRootDesc, &pRootSignaturePresent);
-
-        Shader*           pDownsampleShaders[] = { pShaderDownsampleDepth };
-        RootSignatureDesc downsampleRootDesc = { pDownsampleShaders, 1 };
-        addRootSignature(pRenderer, &downsampleRootDesc, &pRootSignatureDownsampleDepth);
-
-        gPresentPushConstantsIndex = getDescriptorIndexFromName(pRootSignaturePresent, "fsqRootConstants");
-        gShadowPushConstsIndex = getDescriptorIndexFromName(pRootSignatureVBPass, "ShadowRootConstants");
-        gShadowFilteringPushConstsIndex = getDescriptorIndexFromName(pRootSignatureFilterShadows, "RootConstant");
-        gDownsamplePushConstantsIndex = getDescriptorIndexFromName(pRootSignatureDownsampleDepth, "downsampleRootConstants");
-    }
-
-    void removeRootSignatures()
-    {
-        removeRootSignature(pRenderer, pRootSignatureLightClusters);
-        removeRootSignature(pRenderer, pRootSignatureClearBuffers);
-        removeRootSignature(pRenderer, pRootSignatureTriangleFiltering);
-        removeRootSignature(pRenderer, pRootSignatureVBShade);
-        removeRootSignature(pRenderer, pRootSignatureVBPass);
-        removeRootSignature(pRenderer, pRootSignaturePresent);
-        removeRootSignature(pRenderer, pRootSignatureDownsampleDepth);
-        removeRootSignature(pRenderer, pRootSignatureFilterShadows);
-        removeRootSignature(pRenderer, pRootSignatureCleanTexture);
-    }
 
     void addShaders()
     {
@@ -2272,35 +2307,32 @@ public:
         }
 
         vbShade.mVert.pFileName = "visibilityBuffer_shade.vert";
-        vbShade.mFrag.pFileName = "visibilityBuffer_shade_SAMPLE_1.frag";
+        vbShade.mFrag.pFileName =
+            gUseLocalGroupRelaxed ? "visibilityBuffer_shade_SAMPLE_1_relaxed.frag" : "visibilityBuffer_shade_SAMPLE_1.frag";
 
         // Triangle culling compute shader
         triangleCulling.mComp.pFileName = "triangle_filtering.comp";
         // Clear buffers compute shader
         clearBuffer.mComp.pFileName = "clear_buffers.comp";
         // Clear light clusters compute shader
-        clearLights.mComp.pFileName = "clear_light_clusters.comp";
+        clearLights.mComp.pFileName = gUseLocalGroupRelaxed ? "clear_light_clusters_relaxed.comp" : "clear_light_clusters.comp";
         // Cluster lights compute shader
-        clusterLights.mComp.pFileName = "cluster_lights.comp";
+        clusterLights.mComp.pFileName = gUseLocalGroupRelaxed ? "cluster_lights_relaxed.comp" : "cluster_lights.comp";
         // Shadow filtering compute shader
         filterShadows.mComp.pFileName = "shadow_filtering.comp";
         // Texture clearing shader
         clearTexture.mComp.pFileName = "clear_texture.comp";
         // Depth bounds shader
-        depthBounds.mComp.pFileName = "compute_depth_bounds.comp";
+        depthBounds.mComp.pFileName = gUseLocalGroupRelaxed ? "compute_depth_bounds_relaxed.comp" : "compute_depth_bounds.comp";
         // Depth clusters shader
-        depthClusters.mComp.pFileName = "compute_depth_clusters.comp";
+        depthClusters.mComp.pFileName = gUseLocalGroupRelaxed ? "compute_depth_clusters_relaxed.comp" : "compute_depth_clusters.comp";
         // Downsample depth shader
         downsampleDepth.mVert.pFileName = "fsq.vert";
         downsampleDepth.mFrag.pFileName = "downsample_depth.frag";
 
         // Present shader
         present.mVert.pFileName = "fsq.vert";
-#if defined(AUTOMATED_TESTING)
-        present.mFrag.pFileName = "fsq_hq.frag";
-#else
         present.mFrag.pFileName = "fsq.frag";
-#endif
 
         addShader(pRenderer, &shadowPass, &pShaderShadowPass[GEOMSET_OPAQUE]);
         addShader(pRenderer, &shadowPassAlpha, &pShaderShadowPass[GEOMSET_ALPHA_CUTOUT]);
@@ -2317,10 +2349,31 @@ public:
         addShader(pRenderer, &depthBounds, &pShaderComputeDepthBounds);
         addShader(pRenderer, &depthClusters, &pShaderComputeDepthCluster);
         addShader(pRenderer, &downsampleDepth, &pShaderDownsampleDepth);
+
+        // particles shaders
+        {
+            ShaderLoadDesc shaderDesc = {};
+            shaderDesc.mVert = { "particle.vert" };
+            shaderDesc.mFrag = { "particle.frag" };
+            addShader(pRenderer, &shaderDesc, &pParticleRenderShader);
+
+            shaderDesc = {};
+#if defined(AUTOMATED_TESTING)
+            const char* particle_simulate[] = { "particle_simulate_hq.comp", "particle_simulate_low_preset_hq.comp" };
+            shaderDesc.mComp = { particle_simulate[(pRenderer->pGpu->mGpuVendorPreset.mPresetLevel <= GPU_PRESET_LOW)] };
+#else
+            const char* particle_simulate[] = { "particle_simulate.comp", "particle_simulate_low_preset.comp" };
+            shaderDesc.mComp = { particle_simulate[(pRenderer->pGpu->mGpuVendorPreset.mPresetLevel <= GPU_PRESET_LOW)] };
+#endif
+
+            addShader(pRenderer, &shaderDesc, &pParticleSimulateShader);
+        }
     }
 
     void removeShaders()
     {
+        removeShader(pRenderer, pParticleRenderShader);
+        removeShader(pRenderer, pParticleSimulateShader);
         removeShader(pRenderer, pShaderShadowPass[GEOMSET_OPAQUE]);
         removeShader(pRenderer, pShaderShadowPass[GEOMSET_ALPHA_CUTOUT]);
         removeShader(pRenderer, pShaderVisibilityBufferPass[GEOMSET_OPAQUE]);
@@ -2344,53 +2397,58 @@ public:
         // Setup compute pipelines for triangle filtering
         /************************************************************************/
         PipelineDesc pipelineDesc = {};
+        PIPELINE_LAYOUT_DESC(pipelineDesc, SRT_LAYOUT_DESC(TriangleFilteringSrtData, Persistent),
+                             SRT_LAYOUT_DESC(TriangleFilteringSrtData, PerFrame), SRT_LAYOUT_DESC(TriangleFilteringSrtData, PerBatch),
+                             NULL);
         pipelineDesc.mType = PIPELINE_TYPE_COMPUTE;
         ComputePipelineDesc& compPipelineSettings = pipelineDesc.mComputeDesc;
         compPipelineSettings.pShaderProgram = pShaderClearBuffers;
-        compPipelineSettings.pRootSignature = pRootSignatureClearBuffers;
         pipelineDesc.pName = "Clear Filtering Buffers";
         addPipeline(pRenderer, &pipelineDesc, &pPipelineClearBuffers);
 
         // Create the compute pipeline for GPU triangle filtering
         pipelineDesc.pName = "Triangle Filtering";
         compPipelineSettings.pShaderProgram = pShaderTriangleFiltering;
-        compPipelineSettings.pRootSignature = pRootSignatureTriangleFiltering;
         addPipeline(pRenderer, &pipelineDesc, &pPipelineTriangleFiltering);
 
         // Setup the clearing light clusters pipeline
+        PIPELINE_LAYOUT_DESC(pipelineDesc, SRT_LAYOUT_DESC(ClusterLightsSrtData, Persistent),
+                             SRT_LAYOUT_DESC(ClusterLightsSrtData, PerFrame), SRT_LAYOUT_DESC(ClusterLightsSrtData, PerBatch), NULL);
         pipelineDesc.pName = "Clear Light Clusters";
         compPipelineSettings.pShaderProgram = pShaderClearLightClusters;
-        compPipelineSettings.pRootSignature = pRootSignatureLightClusters;
         addPipeline(pRenderer, &pipelineDesc, &pPipelineClearLightClusters);
 
         // Setup the compute light clusters pipeline
         pipelineDesc.pName = "Cluster Lights";
         compPipelineSettings.pShaderProgram = pShaderClusterLights;
-        compPipelineSettings.pRootSignature = pRootSignatureLightClusters;
         addPipeline(pRenderer, &pipelineDesc, &pPipelineClusterLights);
 
         // Setup the shadowmap filtering pipeline
+        PIPELINE_LAYOUT_DESC(pipelineDesc, SRT_LAYOUT_DESC(SrtShadowFilteringCompData, Persistent),
+                             SRT_LAYOUT_DESC(SrtShadowFilteringCompData, PerFrame), NULL,
+                             SRT_LAYOUT_DESC(SrtShadowFilteringCompData, PerDraw));
         pipelineDesc.pName = "Shadowmap filtering";
         compPipelineSettings.pShaderProgram = pShaderFilterShadows;
-        compPipelineSettings.pRootSignature = pRootSignatureFilterShadows;
         addPipeline(pRenderer, &pipelineDesc, &pPipelineFilterShadows);
 
         // Setup the texture clearing pipeline
+        PIPELINE_LAYOUT_DESC(pipelineDesc, SRT_LAYOUT_DESC(SrtVisibilityBufferShadeData, Persistent),
+                             SRT_LAYOUT_DESC(SrtVisibilityBufferShadeData, PerFrame),
+                             SRT_LAYOUT_DESC(SrtVisibilityBufferShadeData, PerBatch), NULL);
         pipelineDesc.pName = "Clear texture";
         compPipelineSettings.pShaderProgram = pShaderCleanTexture;
-        compPipelineSettings.pRootSignature = pRootSignatureCleanTexture;
         addPipeline(pRenderer, &pipelineDesc, &pPipelineCleanTexture);
 
         // Setup the depth bounds pipeline
+        PIPELINE_LAYOUT_DESC(pipelineDesc, SRT_LAYOUT_DESC(ClusterLightsSrtData, Persistent),
+                             SRT_LAYOUT_DESC(ClusterLightsSrtData, PerFrame), SRT_LAYOUT_DESC(ClusterLightsSrtData, PerBatch), NULL);
         pipelineDesc.pName = "Compute depth bounds";
         compPipelineSettings.pShaderProgram = pShaderComputeDepthBounds;
-        compPipelineSettings.pRootSignature = pRootSignatureLightClusters;
         addPipeline(pRenderer, &pipelineDesc, &pPipelineComputeDepthBounds);
 
         // Setup the depth clusters pipeline
         pipelineDesc.pName = "Compute depth clusters";
         compPipelineSettings.pShaderProgram = pShaderComputeDepthCluster;
-        compPipelineSettings.pRootSignature = pRootSignatureLightClusters;
         addPipeline(pRenderer, &pipelineDesc, &pPipelineComputeDepthCluster);
 
         /************************************************************************/
@@ -2408,7 +2466,8 @@ public:
         // Setup the Shadow Pass Pipeline
         /************************************************************************/
         // Setup pipeline settings
-        pipelineDesc = {};
+        PIPELINE_LAYOUT_DESC(pipelineDesc, SRT_LAYOUT_DESC(SrtShadowPassData, Persistent), SRT_LAYOUT_DESC(SrtShadowPassData, PerFrame),
+                             NULL, SRT_LAYOUT_DESC(SrtShadowPassData, PerDraw));
         pipelineDesc.mType = PIPELINE_TYPE_GRAPHICS;
         GraphicsPipelineDesc& shadowPipelineSettings = pipelineDesc.mGraphicsDesc;
         shadowPipelineSettings = { 0 };
@@ -2417,7 +2476,6 @@ public:
         shadowPipelineSettings.mDepthStencilFormat = pRenderTargetShadow->mFormat;
         shadowPipelineSettings.mSampleCount = pRenderTargetShadow->mSampleCount;
         shadowPipelineSettings.mSampleQuality = pRenderTargetShadow->mSampleQuality;
-        shadowPipelineSettings.pRootSignature = pRootSignatureVBPass;
 
         shadowPipelineSettings.pRasterizerState = &rasterizerStateCullFrontDesc;
         shadowPipelineSettings.pVertexLayout = NULL;
@@ -2443,7 +2501,6 @@ public:
         vbPassPipelineSettings.mSampleCount = pRenderTargetVBPass->mSampleCount;
         vbPassPipelineSettings.mSampleQuality = pRenderTargetVBPass->mSampleQuality;
         vbPassPipelineSettings.mDepthStencilFormat = pDepthBuffer->mFormat;
-        vbPassPipelineSettings.pRootSignature = pRootSignatureVBPass;
 
         for (uint32_t i = 0; i < NUM_GEOMETRY_SETS; ++i)
         {
@@ -2457,7 +2514,7 @@ public:
             initExtendedGraphicsShaderLimits(&edescs[0].shaderLimitsDesc);
             edescs[0].shaderLimitsDesc.maxWavesWithLateAllocParameterCache = 16;
 
-            edescs[1].type = EXTENDED_GRAPHICS_PIPELINE_TYPE_DEPTH_STENCIL_OPTIONS;
+            edescs[1].type = EXTENDED_GRAPHICS_PIPELINE_TYPE_PIXEL_SHADER_OPTIONS;
             edescs[1].pixelShaderOptions.outOfOrderRasterization = PIXEL_SHADER_OPTION_OUT_OF_ORDER_RASTERIZATION_ENABLE_WATER_MARK_7;
             edescs[1].pixelShaderOptions.depthBeforeShader =
                 !i ? PIXEL_SHADER_OPTION_DEPTH_BEFORE_SHADER_ENABLE : PIXEL_SHADER_OPTION_DEPTH_BEFORE_SHADER_DEFAULT;
@@ -2473,13 +2530,15 @@ public:
         /************************************************************************/
         // Setup the resources needed for the Visibility Buffer Shade Pipeline
         /************************************************************************/
+        PIPELINE_LAYOUT_DESC(pipelineDesc, SRT_LAYOUT_DESC(SrtVisibilityBufferShadeData, Persistent),
+                             SRT_LAYOUT_DESC(SrtVisibilityBufferShadeData, PerFrame),
+                             SRT_LAYOUT_DESC(SrtVisibilityBufferShadeData, PerBatch), NULL);
         GraphicsPipelineDesc& vbShadePipelineSettings = pipelineDesc.mGraphicsDesc;
         vbShadePipelineSettings = { 0 };
         vbShadePipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
         vbShadePipelineSettings.mRenderTargetCount = 1;
         vbShadePipelineSettings.pDepthState = &depthStateDisableDesc;
         vbShadePipelineSettings.pRasterizerState = &rasterizerStateCullNoneDesc;
-        vbShadePipelineSettings.pRootSignature = pRootSignatureVBShade;
 
         vbShadePipelineSettings.pShaderProgram = pShaderVisibilityBufferShade;
         vbShadePipelineSettings.mSampleCount = SAMPLE_COUNT_1;
@@ -2492,7 +2551,7 @@ public:
         initExtendedGraphicsShaderLimits(&edescs[0].shaderLimitsDesc);
         // edescs[0].ShaderLimitsDesc.MaxWavesWithLateAllocParameterCache = 22;
 
-        edescs[1].type = EXTENDED_GRAPHICS_PIPELINE_TYPE_DEPTH_STENCIL_OPTIONS;
+        edescs[1].type = EXTENDED_GRAPHICS_PIPELINE_TYPE_PIXEL_SHADER_OPTIONS;
         edescs[1].pixelShaderOptions.outOfOrderRasterization = PIXEL_SHADER_OPTION_OUT_OF_ORDER_RASTERIZATION_ENABLE_WATER_MARK_7;
         edescs[1].pixelShaderOptions.depthBeforeShader = PIXEL_SHADER_OPTION_DEPTH_BEFORE_SHADER_ENABLE;
 
@@ -2503,7 +2562,6 @@ public:
         addPipeline(pRenderer, &pipelineDesc, &pPipelineVisibilityBufferShadeSrgb);
         pipelineDesc.mExtensionCount = 0;
 
-        pipelineDesc = {};
         pipelineDesc.mType = PIPELINE_TYPE_GRAPHICS;
         pipelineDesc.mGraphicsDesc.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
         pipelineDesc.mGraphicsDesc.mRenderTargetCount = 1;
@@ -2511,14 +2569,12 @@ public:
         pipelineDesc.mGraphicsDesc.pColorFormats = &pSwapChain->ppRenderTargets[0]->mFormat;
         pipelineDesc.mGraphicsDesc.mSampleCount = pSwapChain->ppRenderTargets[0]->mSampleCount;
         pipelineDesc.mGraphicsDesc.mSampleQuality = pSwapChain->ppRenderTargets[0]->mSampleQuality;
-        pipelineDesc.mGraphicsDesc.pRootSignature = pRootSignaturePresent;
         pipelineDesc.mGraphicsDesc.pShaderProgram = pShaderPresent;
         pipelineDesc.mGraphicsDesc.pVertexLayout = NULL;
         pipelineDesc.mGraphicsDesc.pRasterizerState = &rasterizerStateCullNoneDesc;
         addPipeline(pRenderer, &pipelineDesc, &pPipelinePresent);
 
         TinyImageFormat downsampleDepthFormat = TinyImageFormat_R16G16_SFLOAT;
-        pipelineDesc = {};
         pipelineDesc.mType = PIPELINE_TYPE_GRAPHICS;
         pipelineDesc.mGraphicsDesc.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
         pipelineDesc.mGraphicsDesc.mRenderTargetCount = 1;
@@ -2526,15 +2582,43 @@ public:
         pipelineDesc.mGraphicsDesc.pColorFormats = &downsampleDepthFormat;
         pipelineDesc.mGraphicsDesc.mSampleCount = SAMPLE_COUNT_1;
         pipelineDesc.mGraphicsDesc.mSampleQuality = 0;
-        pipelineDesc.mGraphicsDesc.pRootSignature = pRootSignatureDownsampleDepth;
         pipelineDesc.mGraphicsDesc.pShaderProgram = pShaderDownsampleDepth;
         pipelineDesc.mGraphicsDesc.pVertexLayout = NULL;
         pipelineDesc.mGraphicsDesc.pRasterizerState = &rasterizerStateCullNoneDesc;
         addPipeline(pRenderer, &pipelineDesc, &pPipelineDownsampleDepth);
+
+        // particle pipelines
+        PIPELINE_LAYOUT_DESC(pipelineDesc, SRT_LAYOUT_DESC(ParticleSrtData, Persistent), SRT_LAYOUT_DESC(ParticleSrtData, PerFrame),
+                             SRT_LAYOUT_DESC(ParticleSrtData, PerBatch), NULL);
+        rasterizerStateCullNoneDesc = { CULL_MODE_NONE };
+        BlendStateDesc nullBlending = {};
+        depthStateDesc = {};
+        depthStateDesc.mDepthTest = true;
+        depthStateDesc.mDepthWrite = false;
+        depthStateDesc.mDepthFunc = CMP_GEQUAL;
+
+        pipelineDesc.mType = PIPELINE_TYPE_GRAPHICS;
+        pipelineDesc.mGraphicsDesc.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
+        pipelineDesc.mGraphicsDesc.mRenderTargetCount = 1;
+        pipelineDesc.mGraphicsDesc.pDepthState = &depthStateDesc;
+        pipelineDesc.mGraphicsDesc.pBlendState = &nullBlending;
+        pipelineDesc.mGraphicsDesc.pRasterizerState = &rasterizerStateCullNoneDesc;
+        pipelineDesc.mGraphicsDesc.pShaderProgram = pParticleRenderShader;
+        pipelineDesc.mGraphicsDesc.mSampleCount = SAMPLE_COUNT_1;
+        pipelineDesc.mGraphicsDesc.pColorFormats = &pScreenRenderTarget->mFormat;
+        pipelineDesc.mGraphicsDesc.mDepthStencilFormat = (TinyImageFormat)pDepthBuffer->mFormat;
+        pipelineDesc.mGraphicsDesc.mSampleQuality = pScreenRenderTarget->mSampleQuality;
+        addPipeline(pRenderer, &pipelineDesc, &pParticleRenderPipeline);
+
+        pipelineDesc.mType = PIPELINE_TYPE_COMPUTE;
+        pipelineDesc.mComputeDesc.pShaderProgram = pParticleSimulateShader;
+        addPipeline(pRenderer, &pipelineDesc, &pParticleSimulatePipeline);
     }
 
     void removePipelines()
     {
+        removePipeline(pRenderer, pParticleRenderPipeline);
+        removePipeline(pRenderer, pParticleSimulatePipeline);
         removePipeline(pRenderer, pPipelineVisibilityBufferShadeSrgb);
 
         for (uint32_t i = 0; i < NUM_GEOMETRY_SETS; ++i)
@@ -2690,7 +2774,7 @@ public:
         /*********************************************************/
         // Update particle system uniforms
         /*********************************************************/
-        mat4 cameraView = pCameraController->getViewMatrix();
+        mat4 cameraView = pCameraController->getViewMatrix().mCamera;
 
         pParticleSystemConstantData[currentFrameIdx].ViewTransform = cameraView;
         pParticleSystemConstantData[currentFrameIdx].ProjTransform = cameraProj.mCamera;
@@ -2698,20 +2782,24 @@ public:
         pParticleSystemConstantData[currentFrameIdx].CameraPosition = float4(v3ToF3(pCameraController->getViewPosition()), 1.0f);
         pParticleSystemConstantData[currentFrameIdx].ScreenSize = uint2(gAppResolution.x, gAppResolution.y);
 
-        float firefliesX = cos(gFirefliesWhirlAngle) * gFirefliesFlockRadius;
-        float firefliesZ = 6.0f + sin(gFirefliesWhirlAngle) * gFirefliesFlockRadius;
+        for (uint32_t i = 0; i < 4; i++)
+        {
+            float firefliesX = 3.0f + cos(gFirefliesWhirlAngles[i]) * gFirefliesFlockRadius;
+            float firefliesZ = 6.0f + sin(gFirefliesWhirlAngles[i]) * gFirefliesFlockRadius;
 
-        static int elevationDirection = 1;
-        float      firefliesY = lerp(gFirefliesMinHeight, gFirefliesMaxHeight, ((float)sin(gFirefliesElevationT) + 1.0f) / 2.0f);
+            static int elevationDirection = 1;
+            float      firefliesY = lerp(gFirefliesMinHeight, gFirefliesMaxHeight, ((float)sin(gFirefliesElevationTs[i]) + 1.0f) / 2.0f);
 
-        gFirefliesWhirlAngle += deltaTime * gFirefliesWhirlSpeed;
-        gFirefliesElevationT += deltaTime * gFirefliesElevationSpeed * elevationDirection;
-        if ((gFirefliesElevationT >= 1.0f && elevationDirection == 1) || (gFirefliesElevationT <= 0.0f && elevationDirection == -1))
-            elevationDirection *= -1;
+            gFirefliesWhirlAngles[i] += deltaTime * gFirefliesWhirlSpeeds[i];
+            gFirefliesElevationTs[i] += deltaTime * gFirefliesElevationSpeeds[i] * elevationDirection;
+            if ((gFirefliesElevationTs[i] >= 1.0f && elevationDirection == 1) ||
+                (gFirefliesElevationTs[i] <= 0.0f && elevationDirection == -1))
+                elevationDirection *= -1;
+            pParticleSystemConstantData[currentFrameIdx].SeekPositions[i] = float4(firefliesX, firefliesY, firefliesZ, 1.0f);
+        }
 
         pParticleSystemConstantData[currentFrameIdx].ResetParticles = gJustLoaded ? 1 : 0;
         pParticleSystemConstantData[currentFrameIdx].Time = gCurrTime;
-        pParticleSystemConstantData[currentFrameIdx].SeekPosition = float4(firefliesX, firefliesY, firefliesZ, 1.0f);
         pParticleSystemConstantData[currentFrameIdx].CameraPlanes = float2(CAMERA_NEAR, CAMERA_FAR);
 #if defined(AUTOMATED_TESTING)
         pParticleSystemConstantData[currentFrameIdx].Seed = INT_MAX / 2;
@@ -2725,7 +2813,7 @@ public:
         // Update visibility buffer uniforms
         /***********************************/
         mat4 vbCameraModel = mat4::identity();
-        mat4 vbCameraView = pCameraController->getViewMatrix();
+        mat4 vbCameraView = pCameraController->getViewMatrix().mCamera;
 
         Point3 lightSourcePos(10.f, 000.0f, 10.f);
         lightSourcePos[0] += (20.f);
@@ -2736,14 +2824,20 @@ public:
         CameraMatrix lightProj = CameraMatrix::orthographicReverseZ(-50, 30, -90, 30, -15, 1);
         mat4         lightView = rotation * translation;
 
-        float2 twoOverRes = { 2.0f / float(width), 2.0f / float(height) };
+        float2        twoOverRes = { 2.0f / float(width), 2.0f / float(height) };
         /************************************************************************/
         // Lighting data
         /************************************************************************/
+        RenderTarget* finalTarget = pSwapChain->ppRenderTargets[frameIdx];
         currentFrame->gPerFrameUniformData.camPos = v4ToF4(vec4(pCameraController->getViewPosition()));
         currentFrame->gPerFrameUniformData.lightDir = v4ToF4(vec4(lightDir));
         currentFrame->gPerFrameUniformData.twoOverRes = twoOverRes;
         currentFrame->gPerFrameUniformData.esmControl = gESMControl;
+        currentFrame->gPerFrameUniformData.downSampleSize.x = pRenderTargetDownsampleDepth->mWidth;
+        currentFrame->gPerFrameUniformData.downSampleSize.y = pRenderTargetDownsampleDepth->mHeight;
+        currentFrame->gPerFrameUniformData.finalPresentSize.x = finalTarget->mWidth;
+        currentFrame->gPerFrameUniformData.finalPresentSize.y = finalTarget->mHeight;
+
         /************************************************************************/
         // Matrix data
         /************************************************************************/
@@ -2840,9 +2934,10 @@ public:
         TriangleFilteringPassDesc triangleFilteringDesc = {};
         triangleFilteringDesc.pPipelineClearBuffers = pPipelineClearBuffers;
         triangleFilteringDesc.pPipelineTriangleFiltering = pPipelineTriangleFiltering;
-        triangleFilteringDesc.pDescriptorSetClearBuffers = pDescriptorSetClearBuffers;
-        triangleFilteringDesc.pDescriptorSetTriangleFiltering = pDescriptorSetTriangleFiltering[0];
-        triangleFilteringDesc.pDescriptorSetTriangleFilteringPerFrame = pDescriptorSetTriangleFiltering[1];
+        triangleFilteringDesc.pDescriptorSetClearBuffers = pDescriptorSetPerFrame;
+        triangleFilteringDesc.pDescriptorSetTriangleFiltering = pDescriptorSetPersistent;
+        triangleFilteringDesc.pDescriptorSetTriangleFilteringPerFrame = pDescriptorSetPerFrame;
+        triangleFilteringDesc.pDescriptorSetTriangleFilteringPerBatch = pDescriptorSetTriangleFilteringPerBatch;
         triangleFilteringDesc.mFrameIndex = frameIndex;
         triangleFilteringDesc.mBuffersIndex = frameIndex;
         triangleFilteringDesc.mGpuProfileToken = profileToken;
@@ -2856,11 +2951,16 @@ public:
         uint32_t geomSets[] = { GEOMSET_OPAQUE, GEOMSET_ALPHA_CUTOUT };
         uint2    shadowConsts = { cubeIndex, particleIndex };
 
-        cmdBindPipeline(cmd, pPipelineShadowPass[resourceIndex]);
-        cmdBindDescriptorSet(cmd, 0, pDescriptorSetVBPass[0]);
-        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetVBPass[1]);
-        cmdBindPushConstants(cmd, pRootSignatureVBPass, gShadowPushConstsIndex, &shadowConsts);
+        uint32_t         bufferIndex = particleIndex * 7 + cubeIndex;
+        BufferUpdateDesc shadowConstantsBufferUpdate = { pShadowConstantsBuffers[frameIdx][bufferIndex] };
+        beginUpdateResource(&shadowConstantsBufferUpdate);
+        memcpy(shadowConstantsBufferUpdate.pMappedData, &shadowConsts, sizeof(shadowConsts));
+        endUpdateResource(&shadowConstantsBufferUpdate);
 
+        cmdBindPipeline(cmd, pPipelineShadowPass[resourceIndex]);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetPersistent);
+        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetPerFrame);
+        cmdBindDescriptorSet(cmd, frameIdx * SHADOW_CONSTANTS_BUFFERS_COUNT + bufferIndex, pDescriptorSetShadowConstantsPerDraw);
         uint32_t view = cubeIndex == 0 ? VIEW_SHADOW : VIEW_POINT_SHADOW + particleIndex;
         uint64_t indirectBufferByteOffset = GET_INDIRECT_DRAW_ELEM_INDEX(view, geomSets[resourceIndex], 0) * sizeof(uint32_t);
         Buffer*  pIndirectDrawBuffer = pVisibilityBuffer->ppIndirectDrawArgBuffer[frameIdx];
@@ -2912,7 +3012,7 @@ public:
             // Bind cubemap face
             for (uint32_t c = 0; c < 6; c++)
             {
-                bindDesc.mDepthStencil.mArraySlice = s * 6 + c;
+                bindDesc.mDepthStencil.mArraySlice = s * CUBE_FACE_SIZE + c;
 
                 cmdBindRenderTargets(cmd, &bindDesc);
                 cmdSetViewport(cmd, 0.0f, 0.0f, CUBE_SHADOWS_FACE_SIZE, CUBE_SHADOWS_FACE_SIZE, 0.0f, 1.0f);
@@ -2959,8 +3059,8 @@ public:
         for (uint32_t i = 0; i < NUM_GEOMETRY_SETS; ++i)
         {
             cmdBindPipeline(cmd, pPipelineVisibilityBufferPass[i]);
-            cmdBindDescriptorSet(cmd, 0, pDescriptorSetVBPass[0]);
-            cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetVBPass[1]);
+            cmdBindDescriptorSet(cmd, 0, pDescriptorSetPersistent);
+            cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetPerFrame);
 
             uint64_t indirectBufferByteOffset = GET_INDIRECT_DRAW_ELEM_INDEX(VIEW_CAMERA, i, 0) * sizeof(uint32_t);
             Buffer*  pIndirectDrawBuffer = pVisibilityBuffer->ppIndirectDrawArgBuffer[frameIdx];
@@ -2986,15 +3086,16 @@ public:
         cmdSetScissor(cmd, 0, 0, pScreenRenderTarget->mWidth, pScreenRenderTarget->mHeight);
 
         cmdBindPipeline(cmd, pPipelineVisibilityBufferShadeSrgb);
-        cmdBindDescriptorSet(cmd, 0, pDescriptorSetVBShade[0]);
-        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetVBShade[1]);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetPersistent);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetVisibilityBufferShadePerBatch);
+        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetPerFrame);
         // A single triangle is rendered without specifying a vertex buffer (triangle positions are calculated internally using vertex_id)
         cmdDraw(cmd, 3, 0);
 
         cmdBindRenderTargets(cmd, NULL);
     }
 
-    void downsampleDepthBuffer(Cmd* cmd)
+    void downsampleDepthBuffer(Cmd* cmd, uint32_t frameIdx)
     {
         BindRenderTargetsDesc bindDesc = {};
         bindDesc.mRenderTargetCount = 1;
@@ -3002,42 +3103,42 @@ public:
 
         RenderTargetBarrier rtBarrier = { pRenderTargetDownsampleDepth, RESOURCE_STATE_SHADER_RESOURCE, RESOURCE_STATE_RENDER_TARGET };
         cmdResourceBarrier(cmd, 0, NULL, 0, NULL, 1, &rtBarrier);
-
-        uint2 targetSize = uint2(pRenderTargetDownsampleDepth->mWidth, pRenderTargetDownsampleDepth->mHeight);
-
         cmdBindRenderTargets(cmd, &bindDesc);
         cmdSetViewport(cmd, 0, 0, (float)pRenderTargetDownsampleDepth->mWidth, (float)pRenderTargetDownsampleDepth->mHeight, 0.0f, 1.0f);
         cmdSetScissor(cmd, 0, 0, pRenderTargetDownsampleDepth->mWidth, pRenderTargetDownsampleDepth->mHeight);
         cmdBindPipeline(cmd, pPipelineDownsampleDepth);
-        cmdBindDescriptorSet(cmd, 0, pDescriptorSetDownsampleDepth);
-        cmdBindPushConstants(cmd, pRootSignatureDownsampleDepth, gDownsamplePushConstantsIndex, &targetSize);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetPersistent);
+        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetPerFrame);
         cmdDraw(cmd, 3, 0);
         cmdBindRenderTargets(cmd, NULL);
-
         rtBarrier = { pRenderTargetDownsampleDepth, RESOURCE_STATE_RENDER_TARGET, RESOURCE_STATE_SHADER_RESOURCE };
         cmdResourceBarrier(cmd, 0, NULL, 0, NULL, 1, &rtBarrier);
     }
 
     void computeDepthBounds(Cmd* cmd, uint32_t frameIdx)
     {
-        downsampleDepthBuffer(cmd);
+        downsampleDepthBuffer(cmd, frameIdx);
 
-        uint2 dispatchSize = uint2((uint32_t)ceil((float)pRenderTargetDownsampleDepth->mWidth / DEPTH_BOUNDS_GROUP_AMOUNT_X),
-                                   (uint32_t)ceil((float)pRenderTargetDownsampleDepth->mHeight / DEPTH_BOUNDS_GROUP_AMOUNT_Y));
+        uint2 dispatchSize =
+            uint2((uint32_t)ceil((float)pRenderTargetDownsampleDepth->mWidth / pShaderComputeDepthBounds->mNumThreadsPerGroup[0]),
+                  (uint32_t)ceil((float)pRenderTargetDownsampleDepth->mHeight / pShaderComputeDepthBounds->mNumThreadsPerGroup[1]));
 
         cmdBindPipeline(cmd, pPipelineComputeDepthBounds);
-        cmdBindDescriptorSet(cmd, 0, pDescriptorSetLightClusters[0]);
-        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetLightClusters[1]);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetPersistent);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetClusterLightsPerBatch);
+        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetPerFrame);
         cmdDispatch(cmd, dispatchSize.x, dispatchSize.y, 1);
 
         BufferBarrier bb = { pDepthBoundsBuffer, RESOURCE_STATE_UNORDERED_ACCESS, RESOURCE_STATE_UNORDERED_ACCESS };
         cmdResourceBarrier(cmd, 1, &bb, 0, NULL, 0, NULL);
 
-        dispatchSize = uint2((uint32_t)ceil((float)pDepthBuffer->mWidth / (DEPTH_BOUNDS_GROUP_AMOUNT_X * DEPTH_ClUSTERS_KERNEL_SIZE)),
-                             (uint32_t)ceil((float)pDepthBuffer->mHeight / (DEPTH_BOUNDS_GROUP_AMOUNT_Y * DEPTH_ClUSTERS_KERNEL_SIZE)));
+        dispatchSize = uint2(
+            (uint32_t)ceil((float)pDepthBuffer->mWidth / (pShaderComputeDepthCluster->mNumThreadsPerGroup[0] * DEPTH_ClUSTERS_KERNEL_SIZE)),
+            (uint32_t)ceil((float)pDepthBuffer->mHeight /
+                           (pShaderComputeDepthCluster->mNumThreadsPerGroup[1] * DEPTH_ClUSTERS_KERNEL_SIZE)));
         cmdBindPipeline(cmd, pPipelineComputeDepthCluster);
-        cmdBindDescriptorSet(cmd, 0, pDescriptorSetLightClusters[0]);
-        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetLightClusters[1]);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetPersistent);
+        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetPerFrame);
         cmdDispatch(cmd, dispatchSize.x, dispatchSize.y, 1);
     }
 
@@ -3045,8 +3146,9 @@ public:
     void clearLightClusters(Cmd* cmd, uint32_t frameIdx)
     {
         cmdBindPipeline(cmd, pPipelineClearLightClusters);
-        cmdBindDescriptorSet(cmd, 0, pDescriptorSetLightClusters[0]);
-        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetLightClusters[1]);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetPersistent);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetClusterLightsPerBatch);
+        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetPerFrame);
         cmdDispatch(cmd, 1, 1, 1);
     }
 
@@ -3056,8 +3158,9 @@ public:
         uint32_t dispatchCount = (uint32_t)ceil(sqrt((float)MAX_LIGHT_COUNT));
 
         cmdBindPipeline(cmd, pPipelineClusterLights);
-        cmdBindDescriptorSet(cmd, 0, pDescriptorSetLightClusters[0]);
-        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetLightClusters[1]);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetPersistent);
+        cmdBindDescriptorSet(cmd, 0, pDescriptorSetClusterLightsPerBatch);
+        cmdBindDescriptorSet(cmd, frameIdx, pDescriptorSetPerFrame);
         cmdDispatch(cmd, dispatchCount, dispatchCount, 1);
     }
 

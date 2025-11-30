@@ -15,12 +15,10 @@
   <Dependencies Name="Debug">
     <Project Name="OS"/>
     <Project Name="Renderer"/>
-    <Project Name="SpirVTools"/>
   </Dependencies>
   <Dependencies Name="Release">
     <Project Name="OS"/>
     <Project Name="Renderer"/>
-    <Project Name="SpirVTools"/>
   </Dependencies>
   <Settings Type="Executable">
     <GlobalSettings>
@@ -37,12 +35,10 @@
       <Linker Options="-ludev;-ldl;-pthread;-lXrandr;$(shell pkg-config --libs gtk+-3.0)" Required="yes">
         <LibraryPath Value="$(ProjectPath)/../OSBase/Debug/"/>
         <LibraryPath Value="$(ProjectPath)/../Renderer/Debug/"/>
-        <LibraryPath Value="$(ProjectPath)/../SpirVTools/Debug/"/>
         <Library Value="libOS.a"/>
         <Library Value="libRenderer.a"/>
         <Library Value="libOS.a"/>
         <Library Value="libX11.a"/>
-        <Library Value="libSpirVTools.a"/>
         <Library Value="libvulkan.so"/>
       </Linker>
       <ResourceCompiler Options="" Required="no"/>
@@ -86,10 +82,11 @@
         <CustomPreBuild>shaders
 SRC = $(WorkspacePath)/../src/$(ProjectName)/Shaders/FSL/&#xD;
 DST = $(ProjectPath)/$(ConfigurationName)/&#xD;
-fsl = python3 ../../../../Common_3/Tools/ForgeShadingLanguage/fsl.py -l VULKAN -d $(DST)/Shaders --verbose -b $(DST)/CompiledShaders -i $(DST) --cache-args --incremental&#xD;
+fsl = python3 ../../../../Common_3/Tools/ForgeShadingLanguage/fsl.py -l VULKAN -d $(DST)/Shaders --verbose --debug -b $(DST)/CompiledShaders -i $(DST) --cache-args --incremental&#xD;
 &#xD;
 shaders:&#xD;
 	$(foreach file, $(wildcard $(SRC)/*.fsl), $(fsl) $(file);)
+	$(foreach file, $(wildcard $(SRC)/*.list), $(fsl) $(file);)
 </CustomPreBuild>
       </AdditionalRules>
       <Completion EnableCpp11="no" EnableCpp14="no">
@@ -106,12 +103,10 @@ shaders:&#xD;
       <Linker Options="-ludev;-ldl;-pthread;-lXrandr;$(shell pkg-config --libs gtk+-3.0)" Required="yes">
         <LibraryPath Value="$(ProjectPath)/../OSBase/Release/"/>
         <LibraryPath Value="$(ProjectPath)/../Renderer/Release/"/>
-        <LibraryPath Value="$(ProjectPath)/../SpirVTools/Release/"/>
         <Library Value="libOS.a"/>
         <Library Value="libRenderer.a"/>
         <Library Value="libOS.a"/>
         <Library Value="libX11.a"/>
-        <Library Value="libSpirVTools.a"/>
         <Library Value="libvulkan.so"/>
       </Linker>
       <ResourceCompiler Options="" Required="no"/>
@@ -156,7 +151,8 @@ DST = $(ProjectPath)/$(ConfigurationName)/&#xD;
 fsl = python3 ../../../../Common_3/Tools/ForgeShadingLanguage/fsl.py -l VULKAN -d $(DST)/Shaders --verbose -b $(DST)/CompiledShaders -i $(DST) --cache-args --incremental&#xD;
 &#xD;
 shaders:&#xD;
-	$(foreach file, $(wildcard $(SRC)/*.fsl), $(fsl) $(file);)</CustomPreBuild>
+	$(foreach file, $(wildcard $(SRC)/*.fsl), $(fsl) $(file);)
+	$(foreach file, $(wildcard $(SRC)/*.list), $(fsl) $(file);)</CustomPreBuild>
       </AdditionalRules>
       <Completion EnableCpp11="no" EnableCpp14="no">
         <ClangCmpFlagsC/>

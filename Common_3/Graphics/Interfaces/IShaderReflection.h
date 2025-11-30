@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -43,7 +43,7 @@ typedef enum TextureDimension
     TEXTURE_DIM_UNDEFINED,
 } TextureDimension;
 
-struct VertexInput
+typedef struct VertexInput
 {
     // resource name
     const char* name;
@@ -53,10 +53,10 @@ struct VertexInput
 
     // name size
     uint32_t name_size;
-};
+} VertexInput;
 
 #if defined(METAL)
-struct ArgumentDescriptor
+typedef struct ArgumentDescriptor
 {
     MTLDataType     mDataType;
     uint32_t        mBufferIndex;
@@ -65,67 +65,14 @@ struct ArgumentDescriptor
     MTL_ACCESS_TYPE mAccessType;
     MTLTextureType  mTextureType;
     size_t          mAlignment;
-};
+} ArgumentDescriptor;
 #endif
 
-struct ShaderResource
-{
-    // resource Type
-    DescriptorType type;
-
-    // The resource set for binding frequency
-    uint32_t set;
-
-    // The resource binding location
-    uint32_t reg;
-
-    // The size of the resource. This will be the DescriptorInfo array size for textures
-    uint32_t size;
-
-    // what stages use this resource
-    ShaderStage used_stages;
-
-    // resource name
-    const char* name;
-
-    // name size
-    uint32_t name_size;
-
-    // 1D / 2D / Array / MSAA / ...
-    TextureDimension dim;
-
-#if defined(METAL)
-    uint32_t           alignment;
-    bool               mIsArgumentBufferField;
-    ArgumentDescriptor mArgumentDescriptor;
-#endif
-};
-
-struct ShaderVariable
-{
-    // Variable name
-    const char* name;
-
-    // parents resource index
-    uint32_t parent_index;
-
-    // The offset of the Variable.
-    uint32_t offset;
-
-    // The size of the Variable.
-    uint32_t size;
-
-    // name size
-    uint32_t name_size;
-};
-
-struct ShaderReflection
+typedef struct ShaderReflection
 {
     // single large allocation for names to reduce number of allocations
-    char*           pNamePool;
-    VertexInput*    pVertexInputs;
-    ShaderResource* pShaderResources;
-    ShaderVariable* pVariables;
+    char*        pNamePool;
+    VertexInput* pVertexInputs;
 
 #if defined(VULKAN)
     char* pEntryPoint;
@@ -134,8 +81,6 @@ struct ShaderReflection
     ShaderStage mShaderStage;
 
     uint32_t mNamePoolSize;
-    uint32_t mShaderResourceCount;
-    uint32_t mVariableCount;
 
     uint32_t mVertexInputsCount;
 
@@ -151,20 +96,16 @@ struct ShaderReflection
     bool mResourceHeapIndexing;
     bool mSamplerHeapIndexing;
 #endif
-};
+} ShaderReflection;
 
-struct PipelineReflection
+typedef struct PipelineReflection
 {
-    ShaderResource* pShaderResources;
-    ShaderVariable* pVariables;
-    char*           pNamePool;
+    char* pNamePool;
 
     ShaderStage mShaderStages;
     // the individual stages reflection data.
     uint32_t    mStageReflectionCount;
     uint32_t    mNamePoolSize;
-    uint32_t    mShaderResourceCount;
-    uint32_t    mVariableCount;
 
     uint32_t mVertexStageIndex;
     uint32_t mHullStageIndex;
@@ -183,34 +124,43 @@ struct PipelineReflection
     bool mResourceHeapIndexing;
     bool mSamplerHeapIndexing;
 #endif
-};
+} PipelineReflection;
 
-FORGE_RENDERER_API void removeShaderReflection(ShaderReflection* pReflection);
-
-FORGE_RENDERER_API void addPipelineReflection(ShaderReflection* pReflection, uint32_t stageCount, PipelineReflection* pOutReflection);
-FORGE_RENDERER_API void removePipelineReflection(PipelineReflection* pReflection);
-
-inline bool isDescriptorRootConstant(const char* resourceName)
+#ifdef __cplusplus
+extern "C"
 {
-    char     lower[MAX_RESOURCE_NAME_LENGTH] = {};
-    uint32_t length = (uint32_t)strlen(resourceName);
-    for (uint32_t i = 0; i < length; ++i)
-    {
-        lower[i] = (char)tolower(resourceName[i]);
-    }
-    return strstr(lower, "rootconstant") || strstr(lower, "pushconstant");
-}
+#endif
 
-inline bool isDescriptorRootCbv(const char* resourceName)
-{
-    char     lower[MAX_RESOURCE_NAME_LENGTH] = {};
-    uint32_t length = (uint32_t)strlen(resourceName);
-    for (uint32_t i = 0; i < length; ++i)
-    {
-        lower[i] = (char)tolower(resourceName[i]);
-    }
-    return strstr(lower, "rootcbv");
-}
+    FORGE_RENDERER_API void removeShaderReflection(ShaderReflection* pReflection);
 
-// void serializeReflection(File* pInFile, Reflection* pReflection);
-// void deserializeReflection(File* pOutFile, Reflection* pReflection);
+    FORGE_RENDERER_API void addPipelineReflection(ShaderReflection* pReflection, uint32_t stageCount, PipelineReflection* pOutReflection);
+    FORGE_RENDERER_API void removePipelineReflection(PipelineReflection* pReflection);
+
+    inline bool isDescriptorRootConstant(const char* resourceName)
+    {
+        char     lower[MAX_RESOURCE_NAME_LENGTH] = { 0 };
+        uint32_t length = (uint32_t)strlen(resourceName);
+        for (uint32_t i = 0; i < length; ++i)
+        {
+            lower[i] = (char)tolower(resourceName[i]);
+        }
+        return strstr(lower, "rootconstant") || strstr(lower, "pushconstant");
+    }
+
+    inline bool isDescriptorRootCbv(const char* resourceName)
+    {
+        char     lower[MAX_RESOURCE_NAME_LENGTH] = { 0 };
+        uint32_t length = (uint32_t)strlen(resourceName);
+        for (uint32_t i = 0; i < length; ++i)
+        {
+            lower[i] = (char)tolower(resourceName[i]);
+        }
+        return strstr(lower, "rootcbv");
+    }
+
+    // void serializeReflection(File* pInFile, Reflection* pReflection);
+    // void deserializeReflection(File* pOutFile, Reflection* pReflection);
+
+#ifdef __cplusplus
+}
+#endif

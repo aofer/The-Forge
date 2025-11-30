@@ -48,20 +48,17 @@
     <File Name="../../src/09_LightShadowPlayground/Shaders/FSL/visualizeSDFMesh.comp.fsl"/>
     <File Name="../../src/09_LightShadowPlayground/Shaders/FSL/resolve.frag.fsl"/>
     <File Name="../../src/09_LightShadowPlayground/Shaders/FSL/resolve.vert.fsl"/>
-    <File Name="../../src/09_LightShadowPlayground/Shaders/FSL/ShaderList.fsl"/>
+    <File Name="../../src/09_LightShadowPlayground/Shaders/FSL/shaders.list"/>
   </VirtualDirectory>
   <Dependencies Name="Release">
-    <Project Name="SpirVTools"/>
     <Project Name="Renderer"/>
     <Project Name="OS"/>
   </Dependencies>
   <Dependencies Name="Debug">
-    <Project Name="SpirVTools"/>
     <Project Name="Renderer"/>
     <Project Name="OS"/>
   </Dependencies>
   <Dependencies Name="Release">
-    <Project Name="SpirVTools"/>
     <Project Name="Renderer"/>
     <Project Name="OS"/>
   </Dependencies>
@@ -80,11 +77,9 @@
       <Linker Options="-ludev;-ldl;-pthread;-lXrandr;$(shell pkg-config --libs gtk+-3.0)" Required="yes">
         <LibraryPath Value="$(ProjectPath)/../OSBase/Debug/"/>
         <LibraryPath Value="$(ProjectPath)/../Renderer/Debug/"/>
-        <LibraryPath Value="$(ProjectPath)/../SpirVTools/Debug/"/>
         <Library Value="libRenderer.a"/>
         <Library Value="libOS.a"/>
         <Library Value="libX11.a"/>
-        <Library Value="libSpirVTools.a"/>
         <Library Value="libvulkan.so"/>
       </Linker>
       <ResourceCompiler Options="" Required="no"/>
@@ -109,8 +104,11 @@
         <Command Enabled="yes">rsync -u -r $(WorkspacePath)/OSBase/$(ConfigurationName)/Shaders/ $(ProjectPath)/$(ConfigurationName)/Shaders/</Command>
         <Command Enabled="yes">rsync -u -r $(WorkspacePath)/OSBase/$(ConfigurationName)/CompiledShaders/ $(ProjectPath)/$(ConfigurationName)/CompiledShaders/</Command>
         <Command Enabled="no"># GpuConfig</Command>
-        <Command Enabled="yes">rsync -u $(WorkspacePath)/../../../Art/GPUCfg/$(ProjectName)/gpu.cfg $(ProjectPath)/$(ConfigurationName)/gpu.cfg</Command>
+        <Command Enabled="yes">rsync -u $(WorkspacePath)/../src/$(ProjectName)/GPUCfg/gpu.cfg $(ProjectPath)/$(ConfigurationName)/gpu.cfg</Command>
         <Command Enabled="yes">rsync -u $(WorkspacePath)/../../../Common_3/OS/Linux/steamdeck_gpu.data $(ProjectPath)/$(ConfigurationName)/gpu.data</Command>
+        <Command Enabled="no"># Scripts</Command>
+        <Command Enabled="yes">rsync -u -r --exclude='*/' $(WorkspacePath)/../../../Common_3/Scripts/ $(ProjectPath)/$(ConfigurationName)/Scripts/</Command>
+        <Command Enabled="yes">rsync -u -r --exclude='*/' $(WorkspacePath)/../src/$(ProjectName)/Scripts/ $(ProjectPath)/$(ConfigurationName)/Scripts/</Command>
         <Command Enabled="no"># Misc</Command>
         <Command Enabled="yes">rsync -u -r --include '*.so' --include '*.json' --exclude '*' $(WorkspacePath)/../../../Common_3/Graphics/ThirdParty/OpenSource/VulkanSDK/bin/Linux/ $(ProjectPath)/$(ConfigurationName)/</Command>
         <Command Enabled="yes">rsync -u -r $(WorkspacePath)/../../../Art/SDF/ $(ProjectPath)/$(ConfigurationName)/SDF/</Command>
@@ -130,10 +128,11 @@
         <CustomPreBuild>shaders
 SRC = $(WorkspacePath)/../src/$(ProjectName)/Shaders/FSL/&#xD;
 DST = $(ProjectPath)/$(ConfigurationName)/&#xD;
-fsl = python3 ../../../../Common_3/Tools/ForgeShadingLanguage/fsl.py -l VULKAN -d $(DST)/Shaders --verbose -b $(DST)/CompiledShaders -i $(DST) --cache-args --incremental --compile&#xD;
+fsl = python3 ../../../../Common_3/Tools/ForgeShadingLanguage/fsl.py -l VULKAN -d $(DST)/Shaders --verbose --debug -b $(DST)/CompiledShaders -i $(DST) --cache-args --incremental --compile&#xD;
 &#xD;
 shaders:&#xD;
 	$(foreach file, $(wildcard $(SRC)/*.fsl), $(fsl) $(file);)
+	$(foreach file, $(wildcard $(SRC)/*.list), $(fsl) $(file);)
 </CustomPreBuild>
       </AdditionalRules>
       <Completion EnableCpp11="no" EnableCpp14="no">
@@ -150,11 +149,9 @@ shaders:&#xD;
       <Linker Options="-ludev;-ldl;-pthread;-lXrandr;$(shell pkg-config --libs gtk+-3.0)" Required="yes">
         <LibraryPath Value="$(ProjectPath)/../OSBase/Release/"/>
         <LibraryPath Value="$(ProjectPath)/../Renderer/Release/"/>
-        <LibraryPath Value="$(ProjectPath)/../SpirVTools/Release/"/>
         <Library Value="libRenderer.a"/>
         <Library Value="libOS.a"/>
         <Library Value="libX11.a"/>
-        <Library Value="libSpirVTools.a"/>
         <Library Value="libvulkan.so"/>
       </Linker>
       <ResourceCompiler Options="" Required="no"/>
@@ -179,8 +176,11 @@ shaders:&#xD;
         <Command Enabled="yes">rsync -u -r $(WorkspacePath)/OSBase/$(ConfigurationName)/Shaders/ $(ProjectPath)/$(ConfigurationName)/Shaders/</Command>
         <Command Enabled="yes">rsync -u -r $(WorkspacePath)/OSBase/$(ConfigurationName)/CompiledShaders/ $(ProjectPath)/$(ConfigurationName)/CompiledShaders/</Command>
         <Command Enabled="no"># GpuConfig</Command>
-        <Command Enabled="yes">rsync -u $(WorkspacePath)/../../../Art/GPUCfg/$(ProjectName)/gpu.cfg $(ProjectPath)/$(ConfigurationName)/gpu.cfg</Command>
+        <Command Enabled="yes">rsync -u $(WorkspacePath)/../src/$(ProjectName)/GPUCfg/gpu.cfg $(ProjectPath)/$(ConfigurationName)/gpu.cfg</Command>
         <Command Enabled="yes">rsync -u $(WorkspacePath)/../../../Common_3/OS/Linux/steamdeck_gpu.data $(ProjectPath)/$(ConfigurationName)/gpu.data</Command>
+        <Command Enabled="no"># Scripts</Command>
+        <Command Enabled="yes">rsync -u -r --exclude='*/' $(WorkspacePath)/../../../Common_3/Scripts/ $(ProjectPath)/$(ConfigurationName)/Scripts/</Command>
+        <Command Enabled="yes">rsync -u -r --exclude='*/' $(WorkspacePath)/../src/$(ProjectName)/Scripts/ $(ProjectPath)/$(ConfigurationName)/Scripts/</Command>
         <Command Enabled="no"># Misc</Command>
         <Command Enabled="yes">rsync -u -r --include '*.so' --include '*.json' --exclude '*' $(WorkspacePath)/../../../Common_3/Graphics/ThirdParty/OpenSource/VulkanSDK/bin/Linux/ $(ProjectPath)/$(ConfigurationName)/</Command>
         <Command Enabled="yes">rsync -u -r $(WorkspacePath)/../../../Art/SDF/ $(ProjectPath)/$(ConfigurationName)/SDF/</Command>
@@ -203,7 +203,8 @@ DST = $(ProjectPath)/$(ConfigurationName)/&#xD;
 fsl = python3 ../../../../Common_3/Tools/ForgeShadingLanguage/fsl.py -l VULKAN -d $(DST)/Shaders --verbose -b $(DST)/CompiledShaders -i $(DST) --cache-args --incremental --compile&#xD;
 &#xD;
 shaders:&#xD;
-	$(foreach file, $(wildcard $(SRC)/*.fsl), $(fsl) $(file);)</CustomPreBuild>
+	$(foreach file, $(wildcard $(SRC)/*.fsl), $(fsl) $(file);)
+	$(foreach file, $(wildcard $(SRC)/*.list), $(fsl) $(file);)</CustomPreBuild>
       </AdditionalRules>
       <Completion EnableCpp11="no" EnableCpp14="no">
         <ClangCmpFlagsC/>

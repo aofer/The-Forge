@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2017-2024 The Forge Interactive Inc.
+* Copyright (c) 2017-2025 The Forge Interactive Inc.
 *
 * This file is part of The-Forge
 * (see https://github.com/ConfettiFX/The-Forge).
@@ -21,7 +21,6 @@
 * specific language governing permissions and limitations
 * under the License.
 */
-
 #ifndef _VULKAN_H
 #define _VULKAN_H
 
@@ -91,25 +90,6 @@
 #define CAT(a, b) a ## b
 #define XCAT(a, b) CAT(a, b)
 
-#ifndef UPDATE_FREQ_NONE
-    #define UPDATE_FREQ_NONE      set = 0
-#endif
-#ifndef UPDATE_FREQ_PER_FRAME
-    #define UPDATE_FREQ_PER_FRAME set = 1
-#endif
-#ifndef UPDATE_FREQ_PER_BATCH
-    #define UPDATE_FREQ_PER_BATCH set = 2
-#endif
-#ifndef UPDATE_FREQ_PER_DRAW
-    #define UPDATE_FREQ_PER_DRAW  set = 3
-#endif
-#define UPDATE_FREQ_USER      UPDATE_FREQ_NONE
-#define space4                UPDATE_FREQ_NONE
-#define space5                UPDATE_FREQ_NONE
-#define space6                UPDATE_FREQ_NONE
-#define space10                UPDATE_FREQ_NONE
-
-
 #define STRUCT(NAME) struct NAME
 #define DATA(TYPE, NAME, SEM) TYPE NAME
 
@@ -130,6 +110,7 @@
 #define select lerp
 
 bvec3 Equal(vec3 X, float Y) { return equal(X, vec3(Y));}
+bvec4 Equal(vec4 X, float Y) { return equal(X, vec4(Y)); }
 
 bvec2 LessThan(in(vec2) a, in(float) b)      { return lessThan(a, vec2(b)); }
 bvec2 LessThan(in(vec2) a, in(vec2) b)       { return lessThan(a, b);}
@@ -138,12 +119,22 @@ bvec3 LessThanEqual(in(vec3) X, in(float) Y) { return lessThanEqual(X, f3(Y)); }
 bvec2 LessThanEqual(in(vec2) a, in(vec2) b)  { return lessThanEqual(a, b);}
 
 bvec2 GreaterThan(in(vec2) a, in(float) b)      { return greaterThan(a, vec2(b)); }
-bvec3 GreaterThan(in(vec3) a, in(float) b)      { return greaterThan(a, f3(b)); }
 bvec2 GreaterThan(in(uvec2) a, in(uint) b)      { return greaterThan(a, uvec2(b)); }
 bvec2 GreaterThan(in(vec2) a, in(vec2) b)       { return greaterThan(a, b);}
+bvec2 GreaterThanEqual(in(vec2) a, in(float) b) { return greaterThanEqual(a, vec2(b)); }
 bvec2 GreaterThanEqual(in(vec2) a, in(vec2) b)  { return greaterThanEqual(a, b);}
-bvec4 GreaterThan(in(vec4) a, in(vec4) b)       { return greaterThan(a, b); }
+
+bvec3 GreaterThan(in(vec3) a, in(float) b)      { return greaterThan(a, f3(b)); }
+bvec3 GreaterThan(in(uvec3) a, in(uint) b)      { return greaterThan(a, uvec3(b)); }
+bvec3 GreaterThan(in(vec3) a, in(vec3) b)       { return greaterThan(a, b);}
 bvec3 GreaterThanEqual(in(vec3) a, in(float) b) { return greaterThanEqual(a, vec3(b)); }
+bvec3 GreaterThanEqual(in(vec3) a, in(vec3) b)  { return greaterThanEqual(a, b);}
+
+bvec4 GreaterThan(in(vec4) a, in(float) b)      { return greaterThan(a, vec4(b)); }
+bvec4 GreaterThan(in(uvec4) a, in(uint) b)      { return greaterThan(a, uvec4(b)); }
+bvec4 GreaterThan(in(vec4) a, in(vec4) b)       { return greaterThan(a, b);}
+bvec4 GreaterThanEqual(in(vec4) a, in(float) b) { return greaterThanEqual(a, vec4(b)); }
+bvec4 GreaterThanEqual(in(vec4) a, in(vec4) b)  { return greaterThanEqual(a, b);}
 
 bvec2 And(in(bvec2) a, in(bvec2) b)
 { return bvec2(a.x && b.x, a.y && b.y); }
@@ -191,7 +182,9 @@ bool allGreaterThan(const vec4 a, const vec4 b)
 #define AtomicCompareExchange(DEST, COMPARE_VALUE, VALUE, ORIGINAL_VALUE) \
     ORIGINAL_VALUE = atomicCompSwap((DEST), (COMPARE_VALUE), (VALUE))
 
-#define CBUFFER(T)
+#define CBUFFER(T) T
+#define Buffer(T) T
+#define RWBuffer(T) T
 #define PUSH_CONSTANT(NAME, REG) layout(push_constant) uniform NAME##Block
 
 // #define mul(a, b) (a * b)
@@ -313,10 +306,17 @@ vec4 _LoadLvlOffsetTex3D( texture2DArray TEX, sampler SMP, ivec3 P, int L, ivec3
 
 #define LoadTex2DMS(NAME, SMP, P, S) _LoadTex2DMS((NAME), (SMP), ivec2(P.xy), int(S))
 vec4 _LoadTex2DMS(texture2DMS TEX, sampler SMP, ivec2 P, int S) { return texelFetch(sampler2DMS(TEX, SMP), P, S); }
+uvec4 _LoadTex2DMS(utexture2DMS TEX, sampler SMP, ivec2 P, int S) { return texelFetch(usampler2DMS(TEX, SMP), P, S); }
+ivec4 _LoadTex2DMS(itexture2DMS TEX, sampler SMP, ivec2 P, int S) { return texelFetch(isampler2DMS(TEX, SMP), P, S); }
+
 #define LoadTex2DArrayMS(NAME, SMP, P, S) _LoadTex2DArrayMS((NAME), (SMP), ivec3(P.xyz), int(S))
 vec4 _LoadTex2DArrayMS(texture2DMSArray TEX, sampler SMP, ivec3 P, int S) { return texelFetch(sampler2DMSArray(TEX, SMP), P, S); }
+uvec4 _LoadTex2DArrayMS(utexture2DMSArray TEX, sampler SMP, ivec3 P, int S) { return texelFetch(usampler2DMSArray(TEX, SMP), P, S); }
+ivec4 _LoadTex2DArrayMS(itexture2DMSArray TEX, sampler SMP, ivec3 P, int S) { return texelFetch(isampler2DMSArray(TEX, SMP), P, S); }
 #ifdef GL_EXT_samplerless_texture_functions
 vec4 _LoadTex2DArrayMS(texture2DMSArray TEX, uint _NO_SAMPLER, ivec3 P, int S) { return texelFetch(TEX, P, S); }
+uvec4 _LoadTex2DArrayMS(utexture2DMSArray TEX, uint _NO_SAMPLER, ivec3 P, int S) { return texelFetch(TEX, P, S); }
+ivec4 _LoadTex2DArrayMS(itexture2DMSArray TEX, uint _NO_SAMPLER, ivec3 P, int S) { return texelFetch(TEX, P, S); }
 #endif
 
 #define SampleGradTex2D(TEX, SMP, P, DX, DY) \
@@ -613,9 +613,11 @@ int2 imageSize(texture2DMS TEX) { return textureSize(TEX); }
 int2 imageSize(textureCube TEX) { return textureSize(TEX, 0); }
 int3 imageSize(texture2DArray TEX) { return textureSize(TEX, 0); }
 int3 imageSize(utexture2DArray TEX) { return textureSize(TEX, 0); }
+int3 imageSize(texture2DMSArray TEX) { return textureSize(TEX); }
 
 #define GetDimensions(TEX, SMP) imageSize(TEX)
 #define GetDimensionsMS(TEX, DIM) int2 DIM; { DIM = imageSize(TEX); }
+#define GetDimensionsMSArray(TEX, DIM) int3 DIM; { DIM = imageSize(TEX); }
 
 // int2 GetDimensions(writeonly iimage2D t, uint _NO_SAMPLER) { return imageSize(t); }
 // int2 GetDimensions(writeonly uimage2D t, uint _NO_SAMPLER) { return imageSize(t); }

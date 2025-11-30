@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -60,7 +60,8 @@ bool Rig::LoadSkeleton(const ResourceDirectory resourceDir, const char* fileName
     FileStream file = {};
     if (!fsOpenStreamFromPath(resourceDir, fileName, FM_READ, &file))
     {
-        LOGF(eERROR, "Cannot open skeleton file");
+        LOGF(eERROR, "Cannot open skeleton file %s. Function %s failed with error: %s", fileName, FS_ERR_CTX.func,
+             getFSErrCodeString(FS_ERR_CTX.code));
         return false;
     }
 

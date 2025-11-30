@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2024 The Forge Interactive Inc.
+# Copyright (c) 2017-2025 The Forge Interactive Inc.
 # 
 # This file is part of The-Forge
 # (see https://github.com/ConfettiFX/The-Forge).
@@ -27,6 +27,7 @@ FSL shader generator tool
 import os, sys, argparse
 from inspect import currentframe, getframeinfo
 from multiprocessing import Pool, cpu_count
+import traceback
 
 # add fsl roots to path
 fsl_root = os.path.sep.join(os.path.abspath(__file__).split(os.path.sep)[:-1])
@@ -102,6 +103,7 @@ def process_binary_declaration(job):
     except Exception as e:
         for arg in e.args:
             print(arg)
+        print(traceback.format_exc())
         return 1
     if status != 0: return 1
 

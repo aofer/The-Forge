@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -129,14 +129,17 @@ bool hit##HasHitCandidates = hit.next();
 #define RayQueryBeginForEachCandidate(hit) while (hit##HasHitCandidates)
 #define RayQueryEndForEachCandidate(hit)
 #define RayQueryIsHit(hit) (hit.get_committed_intersection_type() != intersection_type::none)
+#define RayQueryIsHitTriangle(hit) (hit.get_committed_intersection_type() == intersection_type::triangle)
 #define RayQueryIsHitNonOpaqueTriangle(hit) (hit.get_candidate_intersection_type() == intersection_type::triangle)
 #define RayQueryCommitCandidate(hit) hit.commit_triangle_intersection();
 #define RayQueryProceed(hit) hit##HasHitCandidates = hit.next();
 
 #define RayQueryBarycentrics(hit) (hit.get_committed_triangle_barycentric_coord())
 #define RayQueryPrimitiveIndex(hit) (hit.get_committed_primitive_id())
-#define RayQueryInstanceID(hit) (hit.get_committed_instance_id())
+#define RayQueryInstanceID(hit) (hit.get_committed_user_instance_id())
 #define RayQueryGeometryIndex(hit) (hit.get_committed_geometry_id())
+#define RayQueryInstanceIndex(hit) (hit.get_committed_instance_id())
+#define RayQueryRayT(hit) (hit.get_committed_distance())
 
 #define RayQueryCandidateBarycentrics(hit) (hit.get_candidate_triangle_barycentric_coord())
 #define RayQueryCandidatePrimitiveIndex(hit) (hit.get_candidate_primitive_id())

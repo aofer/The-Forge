@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -50,7 +50,7 @@
 #include "../CPUConfig.h"
 
 #if defined(QUEST_VR)
-#include "../Quest/VrApi.h"
+#include "../../Graphics/OpenXR/OpenXRApi.h"
 #endif
 
 #include "../../Utilities/Interfaces/IMemory.h"
@@ -111,6 +111,8 @@ OSInfo* getOsInfo() { return &gOsInfo; }
 extern "C"
 {
     JNIEXPORT void JNICALL TF_ANDROID_JAVA_NATIVE_EVENT(ForgeBaseActivity, nativeThermalEvent)(JNIEnv* env, jobject obj, jint status);
+    JNIEXPORT void JNICALL TF_ANDROID_JAVA_NATIVE_EVENT(ForgeBaseActivity, nativeLog)(JNIEnv* env, jobject obj, jint logLevel,
+                                                                                      jstring jMessage);
     JNIEXPORT void JNICALL TF_ANDROID_JAVA_NATIVE_EVENT(ForgeBaseActivity, nativeOnAlertClosed)(JNIEnv* env, jobject obj);
     JNIEXPORT void JNICALL TF_ANDROID_JAVA_NATIVE_EVENT(ForgeBaseActivity, initializeJni)(JNIEnv* env, jobject obj);
 }
@@ -122,6 +124,14 @@ void JNICALL TF_ANDROID_JAVA_NATIVE_EVENT(ForgeBaseActivity, nativeThermalEvent)
 
     LOGF(eINFO, "Thermal status event: %s (%d)", getThermalStatusString(thermalStatus), thermalStatus);
     gThermalStatus = thermalStatus;
+}
+
+void JNICALL TF_ANDROID_JAVA_NATIVE_EVENT(ForgeBaseActivity, nativeLog)(JNIEnv* env, jobject obj, jint level, jstring jMessage)
+{
+    LogLevel    logLevel = (LogLevel)level;
+    const char* nativeMessage = env->GetStringUTFChars(jMessage, NULL);
+    LOGF(logLevel, "TheForgeJava: %s", nativeMessage);
+    env->ReleaseStringUTFChars(jMessage, nativeMessage);
 }
 
 void JNICALL TF_ANDROID_JAVA_NATIVE_EVENT(ForgeBaseActivity, nativeOnAlertClosed)(JNIEnv* env, jobject obj)
@@ -143,6 +153,13 @@ void JNICALL TF_ANDROID_JAVA_NATIVE_EVENT(ForgeBaseActivity, initializeJni)(JNIE
 }
 
 jobject AndroidGetActivity() { return gActivity; }
+
+extern "C" jint AndroidAttachToCurrentThread(WindowDesc* pWindow, JNIEnv** ppEnv)
+{
+    ASSERT(pWindow);
+    ASSERT(pWindow->handle.activity->vm);
+    return pWindow->handle.activity->vm->AttachCurrentThread(ppEnv, NULL);
+}
 
 // this callback is called only for states other then MEMORYADVICE_STATE_OK.
 void memoryStateWatcherCallback(MemoryAdvice_MemoryState state, void* userData)
@@ -174,8 +191,7 @@ void memoryStateWatcherCallback(MemoryAdvice_MemoryState state, void* userData)
     gMemoryState = tfState;
 }
 
-bool getBenchmarkArguments(android_app* pAndroidApp, JNIEnv* pJavaEnv, int& frameCount, uint32_t& requestRecompileAfter,
-                           char* benchmarkOutput)
+bool getBenchmarkArguments(android_app* pAndroidApp, JNIEnv* pJavaEnv, int& frameCount, char* benchmarkOutput)
 {
     if (!pAndroidApp || !pAndroidApp->activity || !pAndroidApp->activity->vm || !pJavaEnv)
         return false;
@@ -200,18 +216,6 @@ bool getBenchmarkArguments(android_app* pAndroidApp, JNIEnv* pJavaEnv, int& fram
         frameCount = (int)strtol(benchParamCstr, NULL, 10);
         // When done with it, or when you've made a copy
         pJavaEnv->ReleaseStringUTFChars(benchmarkParam, benchParamCstr);
-        argumentsPassed = true;
-    }
-
-    jstring recompileAfterParam = (jstring)pJavaEnv->CallObjectMethod(intent, gseid, pJavaEnv->NewStringUTF("--request-recompile-after"));
-    if (recompileAfterParam != 0x0)
-    {
-        // get c string for value of parameter
-        const char* benchParamCstr = pJavaEnv->GetStringUTFChars(recompileAfterParam, 0);
-        // convert to int.
-        requestRecompileAfter = (int)strtol(benchParamCstr, NULL, 10);
-        // When done with it, or when you've made a copy
-        pJavaEnv->ReleaseStringUTFChars(recompileAfterParam, benchParamCstr);
         argumentsPassed = true;
     }
 
@@ -243,7 +247,7 @@ void requestReload(const ReloadDesc* pReloadDesc) { gReloadDescriptor = *pReload
 
 void errorMessagePopup(const char* title, const char* msg, WindowHandle* handle, errorMessagePopupCallbackFn callback)
 {
-#if defined(AUTOMATED_TESTING) || defined(QUEST_VR)
+#if (defined(AUTOMATED_TESTING) || defined(QUEST_VR)) && !defined(BROWSERSTACK_TESTING)
     LOGF(eERROR, title);
     LOGF(eERROR, msg);
     if (callback)
@@ -262,12 +266,23 @@ void errorMessagePopup(const char* title, const char* msg, WindowHandle* handle,
     }
 
     jclass    clazz = jni->GetObjectClass(handle->activity->clazz);
+#if !defined(BROWSERSTACK_TESTING)
     jmethodID methodID = jni->GetMethodID(clazz, "showAlert", "(Ljava/lang/String;Ljava/lang/String;)V");
     if (!methodID)
     {
         LOGF(LogLevel::eERROR, "Could not find method \'showAlert\' in activity class");
         return;
     }
+#else
+    LOGF(eERROR, title);
+    LOGF(eERROR, msg);
+    jmethodID methodID = jni->GetMethodID(clazz, "showAutoDismissAlert", "(Ljava/lang/String;Ljava/lang/String;)V");
+    if (!methodID)
+    {
+        LOGF(LogLevel::eERROR, "Could not find method \'showAutoDismissAlert\' in activity class");
+        return;
+    }
+#endif
 
     jstring jTitle = jni->NewStringUTF(title);
     jstring jMessage = jni->NewStringUTF(msg);
@@ -447,7 +462,7 @@ void setupPlatformUI(int32_t width, int32_t height)
     UIComponentDesc = {};
     UIComponentDesc.mStartPosition = vec2(width * 0.6f, height * 0.90f);
     uiAddComponent("Reload Control", &UIComponentDesc, &pReloadShaderComponent);
-    platformReloadClientAddReloadShadersWidgets(pReloadShaderComponent);
+    platformSetupReloadClientUI(pReloadShaderComponent);
 #endif
 
     // MICROPROFILER UI
@@ -664,31 +679,23 @@ int AndroidMain(void* param, IApp* app)
         return EXIT_FAILURE;
 
     pSettings->mMonitorIndex = 0;
-
-#if defined(QUEST_VR)
-    initVrApi(android_app, pMainJavaEnv);
-    ASSERT(pQuest);
-    pSettings->mWidth = pQuest->mEyeTextureWidth;
-    pSettings->mHeight = pQuest->mEyeTextureHeight;
-#else
     RectDesc rect = {};
+#if defined(QUEST_VR)
+    InitOpenXRLoader(android_app);
+    CreateOpenXRInstance(app->GetName());
+    InitOpenXRSystem();
+    GetOpenXRRecommendedResolution(&rect);
+#else
     getRecommendedResolution(&rect);
+#endif // QUEST_VR
+
     pSettings->mWidth = getRectWidth(&rect);
     pSettings->mHeight = getRectHeight(&rect);
-#endif
 
 #ifdef AUTOMATED_TESTING
-    int frameCountArgs;
-
-#ifdef ENABLE_FORGE_RELOAD_SHADER
-    extern uint32_t gReloadServerRequestRecompileAfter;
-#else
-    uint32_t gReloadServerRequestRecompileAfter = 0;
-#endif
-
+    int  frameCountArgs;
     char benchmarkOutput[1024] = { "\0" };
-    bool benchmarkArgs =
-        getBenchmarkArguments(android_app, pMainJavaEnv, frameCountArgs, gReloadServerRequestRecompileAfter, &benchmarkOutput[0]);
+    bool benchmarkArgs = getBenchmarkArguments(android_app, pMainJavaEnv, frameCountArgs, &benchmarkOutput[0]);
     if (benchmarkArgs)
     {
         pSettings->mBenchmarking = true;
@@ -732,10 +739,15 @@ int AndroidMain(void* param, IApp* app)
         abort();
     }
 
+#if defined(QUEST_VR)
+    InitOpenXRSession();
+    QueryOpenXRRefreshRates(gSupportedRefreshRates, &gSupportedRefreshRatesCount, &gSelectedRefreshRateIndex);
+#else
     // Query supported refresh rates
     queryAndSetRefreshRates(pMainJavaEnv, android_app);
-
+#endif // QUEST
     setupPlatformUI(pSettings->mWidth, pSettings->mHeight);
+
     pSettings->mInitialized = true;
 
 #ifdef AUTOMATED_TESTING
@@ -772,7 +784,14 @@ int AndroidMain(void* param, IApp* app)
         }
 
 #if defined(QUEST_VR)
-        hook_poll_events(isActive, windowReady, pApp->pWindow->handle.window);
+        PollOpenXREvent(&gShutdownRequested);
+
+        bool isNotShuttingDown = !(gShutdownRequested || android_app->destroyRequested);
+        if (isNotShuttingDown && !pOXR->mSessionStarted)
+        {
+            usleep(250); // Throttle the next call to Poll since XrWaitFrame is not called
+            continue;
+        }
 #endif
 
         float deltaTime = getHiresTimerSeconds(&deltaTimer, true);
@@ -901,13 +920,6 @@ int AndroidMain(void* param, IApp* app)
             continue;
         }
 
-#if defined(QUEST_VR)
-        if (pQuest->pOvr == NULL)
-            continue;
-
-        updateVrApi();
-#endif
-
         // UPDATE APP
         pApp->Update(deltaTime);
         // Skip the fram we are changing refresh rate...
@@ -923,11 +935,7 @@ int AndroidMain(void* param, IApp* app)
         }
 
 #if defined(ENABLE_FORGE_RELOAD_SHADER)
-        if (platformReloadClientShouldQuit())
-        {
-            ANativeActivity_finish(android_app->activity);
-            pApp->mSettings.mQuit = true;
-        }
+        platformUpdateReloadClient();
 #endif
 
 #ifdef AUTOMATED_TESTING
@@ -946,7 +954,11 @@ int AndroidMain(void* param, IApp* app)
             gRefreshRateChanged = false;
 
             // Set fixed refresh rate..
+#if defined(QUEST_VR)
+            RequestOpenXRRefreshRate(gSupportedRefreshRates[gSelectedRefreshRateIndex]);
+#else
             setRefreshRate(pMainJavaEnv, android_app, gSupportedRefreshRates[gSelectedRefreshRateIndex]);
+#endif // QUEST_VR
         }
     }
 
@@ -964,15 +976,15 @@ int AndroidMain(void* param, IApp* app)
 
     pApp->Exit();
 
+#if defined(QUEST_VR)
+    ExitOpenXRLoader();
+#endif
+
     exitBaseSubsystems();
 
     exitWindowSystem();
 
     exitLog();
-
-#if defined(QUEST_VR)
-    exitVrApi();
-#endif
 
     exitFileSystem();
 

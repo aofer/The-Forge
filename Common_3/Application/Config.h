@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -40,6 +40,9 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 
 //////////////////////////////////////////////
 //// Compiler setup
@@ -265,6 +268,8 @@ COMPILE_ASSERT(sizeof(ssize_t) == sizeof(int64_t));
 #define ORBIS
 #elif defined(__PROSPERO__)
 #define PROSPERO
+#elif defined(__linux__)
+#define STEAMDECK
 #endif
 
 #ifndef MIN_MALLOC_ALIGNMENT
@@ -378,6 +383,12 @@ COMPILE_ASSERT(sizeof(ssize_t) == sizeof(int64_t));
 #endif
 #endif
 
+#if defined(FORGE_DEBUG)
+#define IF_FORGE_DEBUG(...) __VA_ARGS__
+#else
+#define IF_FORGE_DEBUG(...)
+#endif
+
 #define ENABLE_LOGGING
 #define DEFAULT_LOG_LEVEL eALL
 #if !defined(NDEBUG)
@@ -408,3 +419,5 @@ COMPILE_ASSERT(sizeof(ssize_t) == sizeof(int64_t));
 #error "_DEBUG and NDEBUG are defined at the same time"
 #endif
 #endif
+
+#define VR_API_OPENXR

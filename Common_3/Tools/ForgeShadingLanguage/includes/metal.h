@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2017-2024 The Forge Interactive Inc.
+* Copyright (c) 2017-2025 The Forge Interactive Inc.
 *
 * This file is part of The-Forge
 * (see https://github.com/ConfettiFX/The-Forge).
@@ -65,11 +65,6 @@ float length(int2 x)
 #define SV_SHADINGRATE      [[_ERROR_NOT_IMPLEMENTED]]
 #define SV_COVERAGE         [[sample_mask]]
 
-#define UPDATE_FREQ_NONE      0
-#define UPDATE_FREQ_PER_FRAME 1
-#define UPDATE_FREQ_PER_BATCH 2
-#define UPDATE_FREQ_PER_DRAW  3
-
 #define MAX_BUFFER_BINDINGS  31
 
 #define STATIC constant
@@ -105,6 +100,9 @@ bool2 And( bool2 a, bool2 b)
 #define AnyLessThanEqual(X, Y)    any(LessThanEqual(X, Y))
 
 bool3 Equal(float3 X, float Y) { return X == f3(Y);}
+bool4 Equal(float4 X, float Y) { return X == f4(Y);}
+bool3 Equal(uint3 X, float Y) { return X == uint3(Y);}
+bool4 Equal(uint4 X, float Y) { return X == uint4(Y);}
 
 bool allGreaterThan(const float4 a, const float4 b)
 { return all(a > b); }
@@ -283,8 +281,10 @@ inline void AtomicExchange(threadgroup uint& dst, uint value, thread uint& origi
 inline void AtomicExchange(device uint& dst, uint value, thread uint& original)
 { original = atomic_exchange_explicit((device atomic_uint*)&dst, value, memory_order_relaxed); }
 
-#define AtomicCompareExchange(DEST, COMPARE_VALUE, VALUE, ORIGINAL_VALUE) \
-    atomic_compare_exchange_weak_explicit(&(DEST), &(COMPARE_VALUE), (VALUE), memory_order_relaxed, memory_order_relaxed)
+inline void AtomicCompareExchange(device uint& dst, thread uint& compare, uint value, thread uint& original)
+{ atomic_compare_exchange_weak_explicit((device atomic_uint*)&dst,&compare, value, memory_order_relaxed, memory_order_relaxed); }
+inline void AtomicCompareExchange(threadgroup uint& dst, thread uint& compare, uint value, thread uint& original)
+{ atomic_compare_exchange_weak_explicit((threadgroup atomic_uint*)&dst,&compare, value, memory_order_relaxed, memory_order_relaxed); }
 
 void AtomicMax(device uint& dst, uint val, thread uint& original)
 { original = atomic_fetch_max_explicit((device atomic_uint*)&(dst), val, memory_order_relaxed); }
@@ -615,6 +615,27 @@ bool any(float3 x) { return any(x!= 0.0f); }
 #define EnablePSInterlock()
 #define BeginPSInterlock()
 #define EndPSInterlock()
+
+// Sampler types
+#define FILTER_NEAREST nearest
+#define FILTER_LINEAR linear
+
+#define MIPMAP_MODE_NEAREST nearest
+#define MIPMAP_MODE_LINEAR linear
+
+#define ADDRESS_MODE_REPEAT repeat
+#define ADDRESS_MODE_MIRROR mirrored_repeat
+#define ADDRESS_MODE_CLAMP_TO_EDGE clamp_to_edge
+#define ADDRESS_MODE_CLAMP_TO_BORDER clamp_to_border
+
+#define CMP_NEVER never
+#define CMP_LESS less
+#define CMP_EQUAL equal
+#define CMP_LEQUAL less_equal
+#define CMP_GREATER greater
+#define CMP_NOTEQUAL not_equal
+#define CMP_GEQUAL greater_equal
+#define CMP_ALWAYS always
 
 // tessellation
 // #define SV_PrimitiveID(N) N

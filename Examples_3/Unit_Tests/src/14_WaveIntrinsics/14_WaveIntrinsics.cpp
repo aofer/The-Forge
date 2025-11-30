@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 The Forge Interactive Inc.
+ * Copyright (c) 2017-2025 The Forge Interactive Inc.
  *
  * This file is part of The-Forge
  * (see https://github.com/ConfettiFX/The-Forge).
@@ -47,6 +47,10 @@
 
 #include "../../../../Common_3/Utilities/Interfaces/IMemory.h"
 
+// fsl
+#include "../../../../Common_3/Graphics/FSL/defaults.h"
+#include "./Shaders/FSL/Global.srt.h"
+
 /// Demo structures
 struct SceneConstantBuffer
 {
@@ -72,11 +76,10 @@ Semaphore* pImageAcquiredSemaphore = NULL;
 
 RenderTarget* pRenderTargetIntermediate = NULL;
 
-Shader*        pShaderWave = NULL;
-Pipeline*      pPipelineWave = NULL;
-Shader*        pShaderMagnify = NULL;
-Pipeline*      pPipelineMagnify = NULL;
-RootSignature* pRootSignature = NULL;
+Shader*   pShaderWave = NULL;
+Pipeline* pPipelineWave = NULL;
+Shader*   pShaderMagnify = NULL;
+Pipeline* pPipelineMagnify = NULL;
 
 DescriptorSet* pDescriptorSetUniforms = NULL;
 DescriptorSet* pDescriptorSetTexture = NULL;
@@ -113,16 +116,16 @@ enum RenderMode
 int32_t gRenderModeToggles = 0;
 
 const char* gTestScripts[] = {
-    "14_WaveIntrinsics/Test_WaveGetLaneIndex.lua",
-    "14_WaveIntrinsics/Test_WaveIsFirstLane.lua",
-    "14_WaveIntrinsics/Test_WaveGetMaxActiveIndex.lua",
-    "14_WaveIntrinsics/Test_WaveActiveBallot.lua",
-    "14_WaveIntrinsics/Test_WaveReadLaneFirst.lua",
-    "14_WaveIntrinsics/Test_WaveActiveSum.lua",
-    "14_WaveIntrinsics/Test_WavePrefixSum.lua",
-    "14_WaveIntrinsics/Test_QuadReadAcross.lua",
+    "Test_WaveGetLaneIndex.lua",
+    "Test_WaveIsFirstLane.lua",
+    "Test_WaveGetMaxActiveIndex.lua",
+    "Test_WaveActiveBallot.lua",
+    "Test_WaveReadLaneFirst.lua",
+    "Test_WaveActiveSum.lua",
+    "Test_WavePrefixSum.lua",
+    "Test_QuadReadAcross.lua",
     // Test_Normal.lua is in the end so that Test_Default outputs identical screenshots for all APIs.
-    "14_WaveIntrinsics/Test_Normal.lua",
+    "Test_Normal.lua",
 };
 
 const char*         gLabels[RenderModeCount] = {};
@@ -156,24 +159,10 @@ public:
         // check for init success
         if (!pRenderer)
         {
-            ShowUnsupportedMessage("Failed To Initialize renderer!");
+            ShowUnsupportedMessage(getUnsupportedGPUMsg());
             return false;
         }
         setupGPUConfigurationPlatformParameters(pRenderer, settings.pExtendedSettings);
-
-        const bool waveOpsSupported = (pRenderer->pGpu->mWaveOpsSupportFlags & WAVE_OPS_SUPPORT_FLAG_BASIC_BIT);
-        if (!waveOpsSupported)
-        {
-            ShowUnsupportedMessage("GPU does not support wave ops");
-            return false;
-        }
-
-        const bool waveOpsStageSupported = (pRenderer->pGpu->mWaveOpsSupportedStageFlags & SHADER_STAGE_FRAG);
-        if (!waveOpsStageSupported)
-        {
-            ShowUnsupportedMessage("GPU does not support wave ops on fragment stage");
-            return false;
-        }
 
         QueueDesc queueDesc = {};
         queueDesc.mType = QUEUE_TYPE_GRAPHICS;
@@ -190,6 +179,10 @@ public:
         initSemaphore(pRenderer, &pImageAcquiredSemaphore);
 
         initResourceLoaderInterface(pRenderer);
+
+        RootSignatureDesc rootDesc = {};
+        INIT_RS_DESC(rootDesc, "default.rootsig", "compute.rootsig");
+        initRootSignature(pRenderer, &rootDesc);
 
         SamplerDesc samplerDesc = { FILTER_NEAREST,      FILTER_NEAREST,      MIPMAP_MODE_NEAREST,
                                     ADDRESS_MODE_REPEAT, ADDRESS_MODE_REPEAT, ADDRESS_MODE_CLAMP_TO_BORDER };
@@ -302,7 +295,7 @@ public:
         luaDefineScripts(scriptDescs, numScripts);
 
         AddCustomInputBindings();
-        initScreenshotInterface(pRenderer, pGraphicsQueue);
+        initScreenshotCapturer(pRenderer, pGraphicsQueue, GetName());
         gFrameIndex = 0;
         waitForAllResourceLoads();
 
@@ -311,7 +304,7 @@ public:
 
     void Exit()
     {
-        exitScreenshotInterface();
+        exitScreenshotCapturer();
         exitProfiler();
 
         exitUserInterface();
@@ -329,7 +322,7 @@ public:
 
         exitSemaphore(pRenderer, pImageAcquiredSemaphore);
         exitGpuCmdRing(pRenderer, &gGraphicsCmdRing);
-
+        exitRootSignature(pRenderer);
         exitResourceLoaderInterface(pRenderer);
         exitQueue(pRenderer, pGraphicsQueue);
         exitRenderer(pRenderer);
@@ -348,7 +341,6 @@ public:
         if (pReloadDesc->mType & RELOAD_TYPE_SHADER)
         {
             addShaders();
-            addRootSignatures();
             addDescriptorSets();
         }
 
@@ -443,7 +435,6 @@ public:
         if (pReloadDesc->mType & RELOAD_TYPE_SHADER)
         {
             removeDescriptorSets();
-            removeRootSignatures();
             removeShaders();
         }
     }
@@ -645,9 +636,9 @@ public:
 
     void addDescriptorSets()
     {
-        DescriptorSetDesc setDesc = { pRootSignature, DESCRIPTOR_UPDATE_FREQ_NONE, 1 };
+        DescriptorSetDesc setDesc = SRT_SET_DESC(SrtData, Persistent, 1, 0);
         addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetTexture);
-        setDesc = { pRootSignature, DESCRIPTOR_UPDATE_FREQ_PER_FRAME, gDataBufferCount };
+        setDesc = SRT_SET_DESC(SrtData, PerFrame, gDataBufferCount, 0);
         addDescriptorSet(pRenderer, &setDesc, &pDescriptorSetUniforms);
     }
 
@@ -656,21 +647,6 @@ public:
         removeDescriptorSet(pRenderer, pDescriptorSetUniforms);
         removeDescriptorSet(pRenderer, pDescriptorSetTexture);
     }
-
-    void addRootSignatures()
-    {
-        Shader*           pShaders[] = { pShaderMagnify, pShaderWave };
-        const char*       pStaticSamplers[] = { "g_sampler" };
-        RootSignatureDesc rootDesc = {};
-        rootDesc.mStaticSamplerCount = 1;
-        rootDesc.ppStaticSamplerNames = pStaticSamplers;
-        rootDesc.ppStaticSamplers = &pSamplerPointWrap;
-        rootDesc.mShaderCount = 2;
-        rootDesc.ppShaders = pShaders;
-        addRootSignature(pRenderer, &rootDesc, &pRootSignature);
-    }
-
-    void removeRootSignatures() { removeRootSignature(pRenderer, pRootSignature); }
 
     void addShaders()
     {
@@ -737,6 +713,7 @@ public:
         DepthStateDesc depthStateDesc = {};
 
         PipelineDesc desc = {};
+        PIPELINE_LAYOUT_DESC(desc, SRT_LAYOUT_DESC(SrtData, Persistent), SRT_LAYOUT_DESC(SrtData, PerFrame), NULL, NULL);
         desc.mType = PIPELINE_TYPE_GRAPHICS;
         GraphicsPipelineDesc& pipelineSettings = desc.mGraphicsDesc;
         pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
@@ -745,7 +722,6 @@ public:
         pipelineSettings.pColorFormats = &pSwapChain->ppRenderTargets[0]->mFormat;
         pipelineSettings.mSampleCount = pSwapChain->ppRenderTargets[0]->mSampleCount;
         pipelineSettings.mSampleQuality = pSwapChain->ppRenderTargets[0]->mSampleQuality;
-        pipelineSettings.pRootSignature = pRootSignature;
         pipelineSettings.pShaderProgram = pShaderWave;
         pipelineSettings.pVertexLayout = &vertexLayout;
         pipelineSettings.pRasterizerState = &rasterizerStateDesc;
@@ -773,20 +749,23 @@ public:
         for (uint32_t i = 0; i < gDataBufferCount; ++i)
         {
             DescriptorData params[1] = {};
-            params[0].pName = "SceneConstantBuffer";
+            params[0].mIndex = SRT_RES_IDX(SrtData, PerFrame, gSceneConstantBuffer);
             params[0].ppBuffers = &pUniformBuffer[i];
             updateDescriptorSet(pRenderer, i, pDescriptorSetUniforms, 1, params);
         }
 
-        DescriptorData magnifyParams[1] = {};
-        magnifyParams[0].pName = "g_texture";
+        DescriptorData magnifyParams[2] = {};
+        magnifyParams[0].mIndex = SRT_RES_IDX(SrtData, Persistent, gTexture);
         magnifyParams[0].ppTextures = &pRenderTargetIntermediate->pTexture;
-        updateDescriptorSet(pRenderer, 0, pDescriptorSetTexture, 1, magnifyParams);
+        magnifyParams[1].mIndex = SRT_RES_IDX(SrtData, Persistent, gSampler);
+        magnifyParams[1].ppSamplers = &pSamplerPointWrap;
+        updateDescriptorSet(pRenderer, 0, pDescriptorSetTexture, 2, magnifyParams);
     }
 
     bool addIntermediateRenderTarget()
     {
-        // Add depth buffer
+        ESRAM_BEGIN_ALLOC(pRenderer, "Intermediate", 0);
+
         RenderTargetDesc rtDesc = {};
         rtDesc.mArraySize = 1;
         rtDesc.mClearValue = {
@@ -800,8 +779,10 @@ public:
         rtDesc.mSampleCount = SAMPLE_COUNT_1;
         rtDesc.mSampleQuality = 0;
         rtDesc.mWidth = mSettings.mWidth;
-        rtDesc.mFlags = TEXTURE_CREATION_FLAG_VR_MULTIVIEW;
+        rtDesc.mFlags = TEXTURE_CREATION_FLAG_ESRAM | TEXTURE_CREATION_FLAG_VR_MULTIVIEW;
         addRenderTarget(pRenderer, &rtDesc, &pRenderTargetIntermediate);
+
+        ESRAM_END_ALLOC(pRenderer);
 
         return pRenderTargetIntermediate != NULL;
     }
