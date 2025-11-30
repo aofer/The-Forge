@@ -78,12 +78,6 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\..\..\Prospero\Common_3\Tools\AssetPipeline\AssetPipeline_TexturesGnf.cpp">
-      <Filter>Prospero\Common_3\Tools\AssetPipeline</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\..\..\Xbox\Common_3\Tools\AssetPipeline\AssetPipeline_TexturesXbox.cpp">
-      <Filter>Xbox\Common_3\Tools\AssetPipeline</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\..\OS\Windows\WindowsToolsFileSystem.cpp">
       <Filter>Common_3\OS\Windows</Filter>
     </ClCompile>
